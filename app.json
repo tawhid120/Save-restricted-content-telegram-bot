@@ -1,0 +1,52 @@
+{
+  "name": "RestrictedContentDL",
+  "description": "A Telegram bot to save restricted content from public channels. Developed by juktijol.",
+  "repository": "https://github.com/tawhid120/Save-restricted-content-bot-",
+  "keywords": ["telegram", "bot", "pyrogram", "restricted-content"],
+  "env": {
+    "API_ID": {
+      "description": "Telegram API ID from https://my.telegram.org",
+      "value": "Your_API_ID_Here",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API Hash from https://my.telegram.org",
+      "value": "Your_API_HASH_Here",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "value": "Your_BOT_TOKEN_Here",
+      "required": true
+    },
+    "DEVELOPER_USER_ID": {
+      "description": "Telegram User ID of the bot developer/owner",
+      "value": "Your_Dev_User_ID_Here",
+      "required": true
+    },
+    "MONGO_URL": {
+      "description": "MongoDB connection string (e.g., mongodb+srv://user:pass@cluster.mongodb.net/)",
+      "value": "Your_MONGO_URL_Here",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "Optional: separate MongoDB URL for main database. Falls back to MONGO_URL if not set.",
+      "value": "",
+      "required": false
+    },
+    "DB_URL": {
+      "description": "Optional: separate MongoDB URL for migration. Falls back to MONGO_URL if not set.",
+      "value": "",
+      "required": false
+    },
+    "COMMAND_PREFIX": {
+      "description": "Command prefixes for bot commands (e.g., !|.|^|/)",
+      "value": "!|.|#|,|/",
+      "required": true
+    },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

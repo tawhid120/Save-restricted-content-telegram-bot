@@ -1,0 +1,17 @@
+pyrofork
+tgcrypto-pyrofork
+uvloop
+asyncio
+aiofiles
+pillow
+pyleaves
+telegraph
+python-dotenv
+speedtest-cli
+pymongo
+motor
+flask
+psutil
+yt-dlp>=2025.05.22
+pybalt
+bgutil-ytdlp-pot-provider
