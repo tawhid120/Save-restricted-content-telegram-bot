@@ -1,8 +1,10 @@
 # Copyright @juktijol
 # Channel t.me/juktijol
 #
-# plugins/referral.py — POWERFUL Referral System v2.1
-# FIXED: Compatible with old referral documents (no _type field)
+# plugins/referral.py — POWERFUL Referral System v2.2
+# FIX v2.2: _count_referrals now correctly counts OLD docs (no _type field)
+#            _check_and_reward_milestones uses fresh count each time
+#            /refgive forces reward even if milestone_log exists
 
 from datetime import datetime, timedelta, timezone
 import urllib.parse
@@ -42,14 +44,21 @@ async def _get_bot_username(client: Client) -> str:
 
 async def _count_referrals(user_id: int) -> int:
     """
-    পুরনো ও নতুন উভয় ধরনের document count করে।
-    পুরনো: {"referrer_id": x, "referred_user_id": y}  (no _type)
-    নতুন:  {"_type": "referral", "referrer_id": x, ...}
+    পুরনো ও নতুন উভয় ধরনের document সঠিকভাবে count করে।
+
+    পুরনো format: {"referrer_id": x, "referred_user_id": y}  — কোনো _type নেই
+    নতুন format:  {"_type": "referral", "referrer_id": x, ...}
+
+    FIX v2.2: $or দিয়ে দুটো case ধরা হচ্ছে:
+      1. _type field একদমই নেই  → পুরনো referral document
+      2. _type আছে কিন্তু "milestone_log" না → নতুন referral document
     """
-    # সব document যেখানে referrer_id মিলে এবং _type "milestone_log" না
     count = await referrals.count_documents({
         "referrer_id": user_id,
-        "_type": {"$ne": "milestone_log"},
+        "$or": [
+            {"_type": {"$exists": False}},            # পুরনো docs — _type field নেই
+            {"_type": {"$nin": ["milestone_log"]}},   # নতুন docs — milestone_log বাদে
+        ],
     })
     return count
 
@@ -128,13 +137,24 @@ async def _give_premium_reward(client: Client, user_id: int, days: int, reason: 
 
 
 async def _check_and_reward_milestones(client: Client, referrer_id: int):
-    """Milestone পূরণ হলে reward দেয়।"""
-    stats = await _get_referral_stats(referrer_id)
-    count = stats["count"]
-    rewarded = stats["rewarded_milestones"]
+    """
+    Milestone পূরণ হলে reward দেয়।
+    FIX v2.2: সবসময় fresh count ব্যবহার করে।
+    """
+    # Fresh count — cache নয়
+    count = await _count_referrals(referrer_id)
+
+    milestone_doc = await referrals.find_one(
+        {"_type": "milestone_log", "user_id": referrer_id}
+    )
+    rewarded = milestone_doc.get("rewarded", []) if milestone_doc else []
+
+    LOGGER.info(f"[Referral] Milestone check — user={referrer_id}, count={count}, rewarded={rewarded}")
 
     for milestone, reward_days in sorted(MILESTONE_REWARDS.items()):
         if count >= milestone and milestone not in rewarded:
+            LOGGER.info(f"[Referral] Unlocking milestone {milestone} for user {referrer_id}")
+            # আগে DB-তে mark করো যাতে duplicate না হয়
             await referrals.update_one(
                 {"_type": "milestone_log", "user_id": referrer_id},
                 {"$addToSet": {"rewarded": milestone}},
@@ -158,7 +178,10 @@ async def process_referral(client: Client, new_user_id: int, referrer_id: int):
     # Duplicate check — পুরনো ও নতুন উভয় format চেক
     existing = await referrals.find_one({
         "referred_user_id": new_user_id,
-        "_type": {"$ne": "milestone_log"},
+        "$or": [
+            {"_type": {"$exists": False}},
+            {"_type": {"$nin": ["milestone_log"]}},
+        ],
     })
     if existing:
         LOGGER.info(f"[Referral] Duplicate blocked: {new_user_id}")
@@ -240,13 +263,13 @@ async def get_referral_text(client: Client, user_id: int) -> str:
         bar = "▓" * 10
         progress_line = f"\n`[{bar}]` 100% 🏆 All milestones completed!"
 
-    # Milestone summary — ✅ rewarded, 🔓 reached but not rewarded, 🔒 not yet
+    # Milestone summary
     milestone_lines = []
     for ms, days in sorted(MILESTONE_REWARDS.items()):
         if ms in rewarded:
             icon = "✅"
         elif count >= ms:
-            icon = "🔓"  # পূরণ হয়েছে কিন্তু reward এখনো দেওয়া হয়নি
+            icon = "🔓"
         else:
             icon = "🔒"
         milestone_lines.append(f"  {icon} **{ms} referrals** → +{days} days Premium")
@@ -291,7 +314,10 @@ def _referral_keyboard(user_id: int, bot_username: str) -> InlineKeyboardMarkup:
 
 async def get_leaderboard_text() -> str:
     pipeline = [
-        {"$match": {"_type": {"$ne": "milestone_log"}}},
+        {"$match": {"$or": [
+            {"_type": {"$exists": False}},
+            {"_type": {"$nin": ["milestone_log"]}},
+        ]}},
         {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
         {"$sort": {"count": -1}},
         {"$limit": 10},
@@ -411,12 +437,19 @@ def setup_referral_handler(app: Client):
             await message.reply_text("❌ **Invalid user ID!**", parse_mode=ParseMode.MARKDOWN)
             return
 
-        stats = await _get_referral_stats(target_id)
-        count = stats["count"]
-        rewarded = stats["rewarded_milestones"]
+        count = await _count_referrals(target_id)
 
+        milestone_doc = await referrals.find_one(
+            {"_type": "milestone_log", "user_id": target_id}
+        )
+        rewarded = milestone_doc.get("rewarded", []) if milestone_doc else []
+
+        # সব referral দেখাও (পুরনো + নতুন)
         cursor = referrals.find(
-            {"referrer_id": target_id, "_type": {"$ne": "milestone_log"}},
+            {"referrer_id": target_id, "$or": [
+                {"_type": {"$exists": False}},
+                {"_type": {"$nin": ["milestone_log"]}},
+            ]},
             {"referred_user_id": 1, "referred_at": 1}
         ).sort("referred_at", -1).limit(10)
         recent = await cursor.to_list(length=10)
@@ -447,11 +480,15 @@ def setup_referral_handler(app: Client):
         & filters.user(DEVELOPER_USER_ID)
     )
     async def refgive_command(client: Client, message: Message):
-        """Manually trigger milestone reward for a user (e.g. for existing referrals)."""
+        """
+        Manually give all pending milestone rewards to a user.
+        FIX v2.2: milestone_log clear করে fresh check করে।
+        """
         if len(message.command) < 2:
             await message.reply_text(
                 "**Usage:** `/refgive <user_id>`\n\n"
-                "Manually check & give milestone rewards for a user.",
+                "Manually check & give milestone rewards for a user.\n\n"
+                "**`/refgive <user_id> force`** — milestone_log সম্পূর্ণ reset করে সব reward দেয়",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -461,27 +498,69 @@ def setup_referral_handler(app: Client):
             await message.reply_text("❌ **Invalid user ID!**", parse_mode=ParseMode.MARKDOWN)
             return
 
-        stats_before = await _get_referral_stats(target_id)
-        await _check_and_reward_milestones(client, target_id)
-        stats_after = await _get_referral_stats(target_id)
+        force_mode = len(message.command) >= 3 and message.command[2].lower() == "force"
 
-        new_rewards = [
-            ms for ms in stats_after["rewarded_milestones"]
-            if ms not in stats_before["rewarded_milestones"]
-        ]
+        # Fresh count
+        count = await _count_referrals(target_id)
+
+        status_msg = await message.reply_text(
+            f"**⏳ Processing...**\n"
+            f"**Referral count:** `{count}`\n"
+            f"**Force mode:** `{'ON' if force_mode else 'OFF'}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+        if force_mode:
+            # milestone_log মুছে দাও — সব eligible milestone আবার দেওয়া হবে
+            await referrals.delete_one({"_type": "milestone_log", "user_id": target_id})
+            LOGGER.info(f"[refgive] Force mode: milestone_log cleared for {target_id}")
+
+        # Check কোন milestones এখনো দেওয়া হয়নি
+        milestone_doc = await referrals.find_one(
+            {"_type": "milestone_log", "user_id": target_id}
+        )
+        rewarded_before = milestone_doc.get("rewarded", []) if milestone_doc else []
+
+        # Reward দাও
+        await _check_and_reward_milestones(client, target_id)
+
+        # After-state
+        milestone_doc_after = await referrals.find_one(
+            {"_type": "milestone_log", "user_id": target_id}
+        )
+        rewarded_after = milestone_doc_after.get("rewarded", []) if milestone_doc_after else []
+
+        new_rewards = [ms for ms in rewarded_after if ms not in rewarded_before]
 
         if new_rewards:
-            await message.reply_text(
-                f"✅ **Rewards given for user `{target_id}`!**\n"
-                f"**Milestones unlocked:** `{new_rewards}`",
+            await status_msg.edit_text(
+                f"✅ **Rewards given for user `{target_id}`!**\n\n"
+                f"**👥 Referral count:** `{count}`\n"
+                f"**🏆 Milestones unlocked:** `{new_rewards}`\n"
+                f"**📋 All rewarded now:** `{rewarded_after}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
         else:
-            await message.reply_text(
-                f"ℹ️ No new rewards for `{target_id}`.\n"
-                f"Count: `{stats_after['count']}` | Already rewarded: `{stats_after['rewarded_milestones']}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            # সম্ভাব্য কারণ ব্যাখ্যা করো
+            pending = [ms for ms, _ in MILESTONE_REWARDS.items()
+                       if ms not in rewarded_after and count >= ms]
+            if pending:
+                await status_msg.edit_text(
+                    f"⚠️ **Rewards should have been given but weren't!**\n\n"
+                    f"**👥 Count:** `{count}`\n"
+                    f"**Already rewarded:** `{rewarded_after}`\n"
+                    f"**Pending (bug?):** `{pending}`\n\n"
+                    f"Try: `/refgive {target_id} force` to force-reset and retry.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            else:
+                await status_msg.edit_text(
+                    f"ℹ️ **No new rewards for `{target_id}`.**\n\n"
+                    f"**👥 Count:** `{count}`\n"
+                    f"**Already rewarded:** `{rewarded_after}`\n\n"
+                    f"_(User needs more referrals to reach next milestone)_",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
 
     # ── Admin: /refstats ──────────────────────────────────────────────────
 
@@ -491,17 +570,29 @@ def setup_referral_handler(app: Client):
         & filters.user(DEVELOPER_USER_ID)
     )
     async def refstats_command(client: Client, message: Message):
-        total_ref = await referrals.count_documents({"_type": {"$ne": "milestone_log"}})
+        # FIX: পুরনো ও নতুন উভয় format count করো
+        total_ref = await referrals.count_documents({
+            "$or": [
+                {"_type": {"$exists": False}},
+                {"_type": {"$nin": ["milestone_log"]}},
+            ]
+        })
 
         ur_result = await referrals.aggregate([
-            {"$match": {"_type": {"$ne": "milestone_log"}}},
+            {"$match": {"$or": [
+                {"_type": {"$exists": False}},
+                {"_type": {"$nin": ["milestone_log"]}},
+            ]}},
             {"$group": {"_id": "$referrer_id"}},
             {"$count": "count"},
         ]).to_list(length=1)
         unique_referrers = ur_result[0]["count"] if ur_result else 0
 
         top_result = await referrals.aggregate([
-            {"$match": {"_type": {"$ne": "milestone_log"}}},
+            {"$match": {"$or": [
+                {"_type": {"$exists": False}},
+                {"_type": {"$nin": ["milestone_log"]}},
+            ]}},
             {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
             {"$sort": {"count": -1}},
             {"$limit": 1},
