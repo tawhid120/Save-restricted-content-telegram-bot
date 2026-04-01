@@ -9,18 +9,20 @@
 # ✅ Supports single files AND full folders (recursive)
 # ✅ Real-time progress bar for both download and upload phases
 # ✅ Cleans up temp files after every operation
-# ✅ Plugs straight into the existing project structure
+# ✅ Auto-detects Drive links in hyperlinks and message text
+# ✅ Uploads based on media type (photo/video/audio/document)
 
 import os
 import re
 import io
 import asyncio
+import mimetypes
 from time import time
 from datetime import datetime
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ParseMode
+from pyrogram.types import Message, MessageEntity
+from pyrogram.enums import ParseMode, MessageEntityType
 from pyrogram.handlers import MessageHandler
 
 from config import COMMAND_PREFIX
@@ -40,12 +42,214 @@ except ImportError:
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-SERVICE_ACCOUNT_FILE = "service_account_key.json"   # place in project root
-DOWNLOAD_DIR         = "gdl_downloads"               # temp directory
-MAX_FILE_SIZE_BYTES  = 2 * 1024 * 1024 * 1024        # 2 GB hard limit
-PROGRESS_UPDATE_SEC  = 3                             # seconds between edits
+SERVICE_ACCOUNT_FILE = "service_account_key.json"
+DOWNLOAD_DIR         = "gdl_downloads"
+MAX_FILE_SIZE_BYTES  = 2 * 1024 * 1024 * 1024
+PROGRESS_UPDATE_SEC  = 3
+
+# Telegram limits
+MAX_PHOTO_SIZE       = 10 * 1024 * 1024      # 10 MB for photos
+MAX_THUMBNAIL_SIZE   = 200 * 1024            # 200 KB for thumbnails
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MEDIA TYPE DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Supported extensions for each media type
+PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
+VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpeg', '.mpg'}
+AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.flac', '.aac', '.ogg', '.wma', '.opus', '.aiff'}
+VOICE_EXTENSIONS = {'.ogg', '.oga'}  # Specifically for voice messages
+ANIMATION_EXTENSIONS = {'.gif'}
+
+# MIME type prefixes
+PHOTO_MIMES = {'image/jpeg', 'image/png', 'image/webp', 'image/bmp', 'image/tiff'}
+VIDEO_MIMES = {'video/mp4', 'video/x-matroska', 'video/avi', 'video/quicktime', 
+               'video/x-msvideo', 'video/x-flv', 'video/webm', 'video/3gpp', 'video/mpeg'}
+AUDIO_MIMES = {'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/flac', 'audio/aac', 
+               'audio/ogg', 'audio/x-ms-wma', 'audio/opus', 'audio/aiff', 'audio/x-m4a'}
+ANIMATION_MIMES = {'image/gif'}
+
+
+def _get_media_type(file_path: str, mime_type: str = None) -> str:
+    """
+    Determine the media type based on file extension and MIME type.
+    Returns: 'photo', 'video', 'audio', 'animation', or 'document'
+    """
+    # Get file extension
+    _, ext = os.path.splitext(file_path.lower())
+    
+    # Get MIME type if not provided
+    if not mime_type:
+        mime_type, _ = mimetypes.guess_type(file_path)
+        mime_type = mime_type or 'application/octet-stream'
+    
+    mime_type = mime_type.lower()
+    
+    # Check for animation (GIF)
+    if ext in ANIMATION_EXTENSIONS or mime_type in ANIMATION_MIMES:
+        return 'animation'
+    
+    # Check for photo
+    if ext in PHOTO_EXTENSIONS or mime_type in PHOTO_MIMES or mime_type.startswith('image/'):
+        # Check file size for photo (Telegram limit is 10MB for photos)
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            if file_size <= MAX_PHOTO_SIZE:
+                return 'photo'
+            else:
+                return 'document'  # Too large for photo, send as document
+        return 'photo'
+    
+    # Check for video
+    if ext in VIDEO_EXTENSIONS or mime_type in VIDEO_MIMES or mime_type.startswith('video/'):
+        return 'video'
+    
+    # Check for audio
+    if ext in AUDIO_EXTENSIONS or mime_type in AUDIO_MIMES or mime_type.startswith('audio/'):
+        return 'audio'
+    
+    # Default to document
+    return 'document'
+
+
+def _get_video_metadata(file_path: str) -> tuple:
+    """
+    Try to get video duration, width, height using ffprobe if available.
+    Returns (duration, width, height) or (0, 0, 0) if not available.
+    """
+    try:
+        import subprocess
+        import json
+        
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-show_format', file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            
+            duration = 0
+            width = 0
+            height = 0
+            
+            # Get duration from format
+            if 'format' in data and 'duration' in data['format']:
+                duration = int(float(data['format']['duration']))
+            
+            # Get video stream info
+            for stream in data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    width = stream.get('width', 0)
+                    height = stream.get('height', 0)
+                    if 'duration' in stream and duration == 0:
+                        duration = int(float(stream['duration']))
+                    break
+            
+            return duration, width, height
+    except Exception as e:
+        LOGGER.debug(f"[GDL] Could not get video metadata: {e}")
+    
+    return 0, 0, 0
+
+
+def _get_audio_metadata(file_path: str) -> tuple:
+    """
+    Try to get audio duration, title, performer using ffprobe or mutagen.
+    Returns (duration, title, performer) or (0, None, None) if not available.
+    """
+    try:
+        import subprocess
+        import json
+        
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-show_format', file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            
+            duration = 0
+            title = None
+            performer = None
+            
+            # Get info from format
+            if 'format' in data:
+                fmt = data['format']
+                if 'duration' in fmt:
+                    duration = int(float(fmt['duration']))
+                
+                tags = fmt.get('tags', {})
+                # Tags might be case-insensitive
+                for key, value in tags.items():
+                    key_lower = key.lower()
+                    if key_lower == 'title':
+                        title = value
+                    elif key_lower in ('artist', 'performer', 'album_artist'):
+                        performer = value
+            
+            return duration, title, performer
+    except Exception as e:
+        LOGGER.debug(f"[GDL] Could not get audio metadata: {e}")
+    
+    return 0, None, None
+
+
+async def _generate_thumbnail(file_path: str, media_type: str) -> str | None:
+    """
+    Generate a thumbnail for video/audio files.
+    Returns path to thumbnail or None.
+    """
+    if media_type not in ('video', 'audio'):
+        return None
+    
+    try:
+        import subprocess
+        
+        thumb_path = file_path + "_thumb.jpg"
+        
+        if media_type == 'video':
+            # Extract frame at 1 second
+            cmd = [
+                'ffmpeg', '-y', '-i', file_path,
+                '-ss', '00:00:01', '-vframes', '1',
+                '-vf', 'scale=320:-1',
+                thumb_path
+            ]
+        else:
+            # For audio, try to extract album art
+            cmd = [
+                'ffmpeg', '-y', '-i', file_path,
+                '-an', '-vcodec', 'mjpeg',
+                '-vf', 'scale=320:-1',
+                thumb_path
+            ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await asyncio.wait_for(process.wait(), timeout=30)
+        
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+            # Check thumbnail size
+            if os.path.getsize(thumb_path) <= MAX_THUMBNAIL_SIZE:
+                return thumb_path
+            else:
+                os.remove(thumb_path)
+        
+    except Exception as e:
+        LOGGER.debug(f"[GDL] Could not generate thumbnail: {e}")
+    
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +281,71 @@ def _progress_bar(pct: float, length: int = 20) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# EXTRACT DRIVE LINKS FROM MESSAGE (INCLUDING HYPERLINKS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_all_drive_links(message: Message) -> list[str]:
+    """
+    Extract all Google Drive links from a message, including:
+    - Plain text links
+    - Hyperlinks (text_link entities)
+    - URLs in entities
+    """
+    drive_links = set()
+    
+    # Pattern to match Google Drive URLs
+    drive_pattern = re.compile(
+        r'https?://(?:www\.)?(?:drive\.google\.com|docs\.google\.com)[^\s<>\[\]()"\']+'
+    )
+    
+    # 1. Extract from plain text
+    text = message.text or message.caption or ""
+    for match in drive_pattern.finditer(text):
+        drive_links.add(match.group())
+    
+    # 2. Extract from entities (hyperlinks, URLs)
+    entities = message.entities or message.caption_entities or []
+    
+    for entity in entities:
+        # TEXT_LINK - hyperlinked text with a URL
+        if entity.type == MessageEntityType.TEXT_LINK:
+            url = entity.url
+            if url and ('drive.google.com' in url or 'docs.google.com' in url):
+                drive_links.add(url)
+        
+        # URL - plain URL in text
+        elif entity.type == MessageEntityType.URL:
+            # Extract the URL from text using offset and length
+            url = text[entity.offset:entity.offset + entity.length]
+            if 'drive.google.com' in url or 'docs.google.com' in url:
+                drive_links.add(url)
+    
+    return list(drive_links)
+
+
+def _extract_drive_id(url: str) -> str | None:
+    """Extract the file or folder ID from any Google Drive URL."""
+    patterns = [
+        r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)",
+        r"drive\.google\.com/folders/([a-zA-Z0-9_-]+)",
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+        r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
+        r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)",
+        r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]+)",
+        r"docs\.google\.com/presentation/d/([a-zA-Z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _is_folder_url(url: str) -> bool:
+    return "/folders/" in url
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GOOGLE DRIVE UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -92,25 +361,6 @@ def _build_drive_service():
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
     )
     return build("drive", "v3", credentials=creds)
-
-
-def _extract_drive_id(url: str) -> str | None:
-    """Extract the file or folder ID from any Google Drive URL."""
-    patterns = [
-        r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/folders/([a-zA-Z0-9_-]+)",
-        r"[?&]id=([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _is_folder_url(url: str) -> bool:
-    return "/folders/" in url
 
 
 def _get_file_metadata(service, file_id: str) -> dict:
@@ -188,7 +438,6 @@ async def _download_drive_file(
     is_doc, export_mime, ext = _is_google_doc(mime_type)
 
     if is_doc:
-        # Google Workspace file → export
         if not file_name.endswith(ext):
             file_name += ext
         local_path = os.path.splitext(local_path)[0] + ext
@@ -233,7 +482,7 @@ async def _download_drive_file(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPLOAD A LOCAL FILE → TELEGRAM (via Pyrofork MTProto — up to 2 GB)
+# UPLOAD A LOCAL FILE → TELEGRAM (MEDIA TYPE AWARE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _upload_to_telegram(
@@ -243,14 +492,21 @@ async def _upload_to_telegram(
     file_name: str,
     caption: str,
     status_msg: Message,
+    mime_type: str = None,
 ) -> bool:
     """
     Upload local_path to Telegram chat using MTProto.
-    Shows a live progress bar.  Returns True on success.
+    Automatically detects media type and uploads accordingly.
+    Shows a live progress bar. Returns True on success.
     """
     file_size = os.path.getsize(local_path)
     start_ts  = [time()]
     last_edit = [0.0]
+    
+    # Determine media type
+    media_type = _get_media_type(local_path, mime_type)
+    
+    LOGGER.info(f"[GDL] Uploading {file_name} as {media_type}")
 
     async def _progress(current: int, total: int):
         now = time()
@@ -261,33 +517,131 @@ async def _upload_to_telegram(
         eta     = (total - current) / speed if speed > 0 else 0
         pct     = (current / total * 100) if total > 0 else 0
         bar     = _progress_bar(pct)
+        
+        media_emoji = {
+            'photo': '🖼',
+            'video': '🎬',
+            'audio': '🎵',
+            'animation': '🎞',
+            'document': '📄'
+        }.get(media_type, '📄')
+        
         try:
             await status_msg.edit_text(
-                f"📤 **Uploading to Telegram...**\n\n"
+                f"📤 **Uploading as {media_type.upper()}...**\n\n"
                 f"`[{bar}]` {pct:.1f}%\n\n"
                 f"📦 **Uploaded:** `{_readable_size(current)}` / `{_readable_size(total)}`\n"
                 f"⚡ **Speed:** `{_readable_size(speed)}/s`\n"
                 f"⏳ **ETA:** `{_readable_time(eta)}`\n\n"
-                f"📄 `{file_name}`",
+                f"{media_emoji} `{file_name}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
             last_edit[0] = now
         except Exception:
             pass
 
+    thumb_path = None
+    
     try:
-        await client.send_document(
-            chat_id=chat_id,
-            document=local_path,
-            file_name=file_name,
-            caption=caption,
-            parse_mode=ParseMode.MARKDOWN,
-            progress=_progress,
-        )
+        if media_type == 'photo':
+            await client.send_photo(
+                chat_id=chat_id,
+                photo=local_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                progress=_progress,
+            )
+        
+        elif media_type == 'video':
+            # Get video metadata
+            duration, width, height = _get_video_metadata(local_path)
+            
+            # Generate thumbnail
+            thumb_path = await _generate_thumbnail(local_path, 'video')
+            
+            await client.send_video(
+                chat_id=chat_id,
+                video=local_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                duration=duration,
+                width=width,
+                height=height,
+                thumb=thumb_path,
+                file_name=file_name,
+                supports_streaming=True,
+                progress=_progress,
+            )
+        
+        elif media_type == 'audio':
+            # Get audio metadata
+            duration, title, performer = _get_audio_metadata(local_path)
+            
+            # Generate thumbnail (album art)
+            thumb_path = await _generate_thumbnail(local_path, 'audio')
+            
+            await client.send_audio(
+                chat_id=chat_id,
+                audio=local_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                duration=duration,
+                title=title or os.path.splitext(file_name)[0],
+                performer=performer,
+                thumb=thumb_path,
+                file_name=file_name,
+                progress=_progress,
+            )
+        
+        elif media_type == 'animation':
+            await client.send_animation(
+                chat_id=chat_id,
+                animation=local_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                progress=_progress,
+            )
+        
+        else:  # document
+            await client.send_document(
+                chat_id=chat_id,
+                document=local_path,
+                file_name=file_name,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                progress=_progress,
+            )
+        
         return True
+        
     except Exception as e:
-        LOGGER.error(f"[GDL] Upload failed for {file_name}: {e}")
+        LOGGER.error(f"[GDL] Upload as {media_type} failed for {file_name}: {e}")
+        
+        # Fallback to document if other media type fails
+        if media_type != 'document':
+            LOGGER.info(f"[GDL] Falling back to document upload for {file_name}")
+            try:
+                await client.send_document(
+                    chat_id=chat_id,
+                    document=local_path,
+                    file_name=file_name,
+                    caption=caption + "\n\n⚠️ _Uploaded as document (fallback)_",
+                    parse_mode=ParseMode.MARKDOWN,
+                    progress=_progress,
+                )
+                return True
+            except Exception as e2:
+                LOGGER.error(f"[GDL] Fallback upload also failed: {e2}")
+        
         return False
+    
+    finally:
+        # Clean up thumbnail
+        if thumb_path and os.path.exists(thumb_path):
+            try:
+                os.remove(thumb_path)
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,10 +650,9 @@ async def _upload_to_telegram(
 
 async def _process_gdl(client: Client, message: Message, url: str):
     """Full pipeline: validate → fetch metadata → download → upload → cleanup."""
-    user   = message.from_user
+    user    = message.from_user
     chat_id = message.chat.id
 
-    # ── Validate Google API availability ──────────────────────────────────
     if not GDRIVE_AVAILABLE:
         await message.reply_text(
             "❌ **Google Drive support is not available.**\n\n"
@@ -309,7 +662,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
         )
         return
 
-    # ── Extract Drive ID ──────────────────────────────────────────────────
     file_id = _extract_drive_id(url)
     if not file_id:
         await message.reply_text(
@@ -322,7 +674,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
         )
         return
 
-    # ── Build Drive service ───────────────────────────────────────────────
     try:
         service = await asyncio.get_event_loop().run_in_executor(None, _build_drive_service)
     except FileNotFoundError as e:
@@ -369,7 +720,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
                 )
                 return
 
-            # Size guard
             total_size = sum(int(f.get("size", 0)) for f in files)
             if total_size > MAX_FILE_SIZE_BYTES:
                 await status_msg.edit_text(
@@ -392,12 +742,12 @@ async def _process_gdl(client: Client, message: Message, url: str):
             fail_count    = 0
 
             for idx, item in enumerate(files, 1):
-                item_name    = item["name"]
-                item_id      = item["id"]
-                item_mime    = item.get("mimeType", "")
-                item_size    = int(item.get("size", 0))
+                item_name     = item["name"]
+                item_id       = item["id"]
+                item_mime     = item.get("mimeType", "")
+                item_size     = int(item.get("size", 0))
                 relative_path = item.get("relative_path", item_name)
-                local_path   = os.path.join(DOWNLOAD_DIR, str(user.id), relative_path)
+                local_path    = os.path.join(DOWNLOAD_DIR, str(user.id), relative_path)
 
                 await status_msg.edit_text(
                     f"📁 **{folder_name}**\n"
@@ -408,12 +758,10 @@ async def _process_gdl(client: Client, message: Message, url: str):
                 )
 
                 try:
-                    # Download
                     local_path = await _download_drive_file(
                         service, item_id, item_name, item_mime, local_path, status_msg
                     )
 
-                    # Build caption
                     caption = (
                         f"📄 **{item_name}**\n"
                         f"📁 Path: `{relative_path}`\n"
@@ -422,10 +770,9 @@ async def _process_gdl(client: Client, message: Message, url: str):
                         f"_Downloaded by @juktijol Bot_"
                     )
 
-                    # Upload
                     ok = await _upload_to_telegram(
                         client, chat_id, local_path,
-                        os.path.basename(local_path), caption, status_msg
+                        os.path.basename(local_path), caption, status_msg, item_mime
                     )
                     if ok:
                         success_count += 1
@@ -460,7 +807,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
             mime_type = meta.get("mimeType", "application/octet-stream")
             file_size = int(meta.get("size", 0))
 
-            # Size guard (skip for Google Docs since we don't know export size)
             is_doc, _, _ = _is_google_doc(mime_type)
             if not is_doc and file_size > MAX_FILE_SIZE_BYTES:
                 await status_msg.edit_text(
@@ -488,7 +834,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
                 actual_size = os.path.getsize(local_path)
 
-                # Second size check after download (important for exported Google Docs)
                 if actual_size > MAX_FILE_SIZE_BYTES:
                     await status_msg.edit_text(
                         f"❌ **Exported file is too large:** `{_readable_size(actual_size)}`",
@@ -505,13 +850,15 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
                 ok = await _upload_to_telegram(
                     client, chat_id, local_path,
-                    os.path.basename(local_path), caption, status_msg
+                    os.path.basename(local_path), caption, status_msg, mime_type
                 )
 
                 if ok:
+                    media_type = _get_media_type(local_path, mime_type)
                     await status_msg.edit_text(
                         f"✅ **Done!** `{os.path.basename(local_path)}`\n"
-                        f"📦 `{_readable_size(actual_size)}`",
+                        f"📦 `{_readable_size(actual_size)}`\n"
+                        f"📤 Uploaded as: `{media_type.upper()}`",
                         parse_mode=ParseMode.MARKDOWN,
                     )
                 else:
@@ -548,42 +895,75 @@ def setup_gdl_handler(app: Client):
     async def gdl_command(client: Client, message: Message):
         """
         /gdl <Google Drive link>
+        OR
+        /gdl (as reply to a message containing Drive links)
 
         Downloads the file from Google Drive and uploads it directly to the
         current chat via Pyrofork MTProto (supports up to 2 GB).
+        Automatically uploads as the correct media type (photo/video/audio/document).
         """
-        # ── Parse argument ────────────────────────────────────────────────
-        if len(message.command) < 2:
+        urls_to_process = []
+        
+        # ── Check for URL in command arguments ────────────────────────────
+        if len(message.command) >= 2:
+            url = message.command[1].strip()
+            if 'drive.google.com' in url or 'docs.google.com' in url:
+                urls_to_process.append(url)
+        
+        # ── Check replied message for Drive links (including hyperlinks) ──
+        if message.reply_to_message:
+            replied_links = _extract_all_drive_links(message.reply_to_message)
+            urls_to_process.extend(replied_links)
+        
+        # ── Also check current message text for embedded links ────────────
+        current_links = _extract_all_drive_links(message)
+        for link in current_links:
+            if link not in urls_to_process:
+                urls_to_process.append(link)
+        
+        # ── Remove duplicates while preserving order ──────────────────────
+        seen = set()
+        unique_urls = []
+        for url in urls_to_process:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        # ── No links found ────────────────────────────────────────────────
+        if not unique_urls:
             await message.reply_text(
                 "**📥 Google Drive Downloader**\n"
                 "━━━━━━━━━━━━━━━━━━\n\n"
-                "**Usage:** `/gdl <Google Drive link>`\n\n"
+                "**Usage:**\n"
+                "• `/gdl <Google Drive link>`\n"
+                "• Reply to a message containing Drive links with `/gdl`\n\n"
                 "**Supported links:**\n"
                 "• `https://drive.google.com/file/d/<ID>/view`\n"
                 "• `https://drive.google.com/folders/<ID>`\n"
-                "• `https://drive.google.com/open?id=<ID>`\n\n"
-                "**Limits:**\n"
-                "• Max file size: `2 GB`\n"
-                "• Google Workspace files are exported to Office format\n\n"
+                "• Hyperlinks containing Drive URLs\n\n"
+                "**Features:**\n"
+                "• 🖼 Photos → sent as photos\n"
+                "• 🎬 Videos → sent as videos (with thumbnail)\n"
+                "• 🎵 Audio → sent as audio (with metadata)\n"
+                "• 📄 Other → sent as documents\n\n"
+                "**Limits:** Max file size `2 GB`\n\n"
                 "**Example:**\n"
                 "`/gdl https://drive.google.com/file/d/1BxiM.../view`",
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
             return
-
-        url = message.command[1].strip()
-
-        # Rudimentary URL validation
-        if "drive.google.com" not in url and "docs.google.com" not in url:
+        
+        # ── Process all found links ───────────────────────────────────────
+        if len(unique_urls) > 1:
             await message.reply_text(
-                "❌ **That doesn't look like a Google Drive link.**\n\n"
-                "Please send a valid `drive.google.com` URL.",
+                f"🔗 **Found {len(unique_urls)} Drive links**\n"
+                f"Processing them one by one...",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            return
-
-        LOGGER.info(f"[GDL] User {message.from_user.id} requested: {url}")
-        await _process_gdl(client, message, url)
+        
+        for url in unique_urls:
+            LOGGER.info(f"[GDL] User {message.from_user.id} requested: {url}")
+            await _process_gdl(client, message, url)
 
     LOGGER.info("[GDL] /gdl command handler registered.")
