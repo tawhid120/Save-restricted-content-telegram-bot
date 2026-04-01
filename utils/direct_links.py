@@ -817,8 +817,9 @@ def _mediafire(url: str, session=None) -> str | dict:
     except ImportError:
         raise DirectLinkException("MediaFire: lxml required.")
 
-    if html.xpath('//p[@class="notranslate"]/text()'):
-        raise DirectLinkException(f"MediaFire: {html.xpath('//p[@class=\"notranslate\"]/text()')[0]}")
+    _mf_err = html.xpath('//p[@class="notranslate"]/text()')
+    if _mf_err:
+        raise DirectLinkException(f"MediaFire: {_mf_err[0]}")
 
     if html.xpath("//div[@class='passwordPrompt']"):
         if not pwd:
@@ -834,7 +835,6 @@ def _mediafire(url: str, session=None) -> str | dict:
     if link[0].startswith("//"):
         return _mediafire(f"https:{link[0]}" + (f"::{pwd}" if pwd else ""), session)
     return link[0]
-
 
 def _mediafire_folder(url: str) -> dict:
     pwd = None
