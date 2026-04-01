@@ -17,6 +17,7 @@
 #       - Caption text
 # ✅ SMART UPLOAD — photo/video/audio/animation/document based on MIME type
 # ✅ Fallback to document if specific media upload fails
+# ✅ /drive/folders/ AND /folders/ both supported
 # ✅ Plugs straight into the existing project structure
 
 import os
@@ -94,6 +95,68 @@ _DRIVE_URL_RE = re.compile(
     r"https?://(?:drive|docs)\.google\.com/\S+",
     re.IGNORECASE,
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ FIX: DRIVE ID + FOLDER DETECTION
+#   Handles ALL known URL formats including /drive/folders/ variant
+#
+#   Supported URL formats:
+#   • https://drive.google.com/file/d/<ID>/view
+#   • https://drive.google.com/drive/folders/<ID>        ← এটা আগে মিস হতো!
+#   • https://drive.google.com/folders/<ID>
+#   • https://drive.google.com/open?id=<ID>
+#   • https://drive.google.com/drive/u/0/folders/<ID>    ← user-index variant
+#   • https://docs.google.com/document/d/<ID>/edit
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_drive_id(url: str) -> str | None:
+    """
+    Extract the file or folder ID from ANY Google Drive / Docs URL.
+
+    Pattern priority (most specific → least specific):
+    1. /file/d/<ID>
+    2. /folders/<ID>         — catches both /folders/ and /drive/folders/
+                               and /drive/u/0/folders/ etc.
+    3. ?id=<ID> or &id=<ID>
+    4. /open?id=<ID>
+    5. /d/<ID>               — generic docs pattern
+    """
+    patterns = [
+        # Single file: /file/d/<ID>
+        r"/file/d/([a-zA-Z0-9_-]{10,})",
+
+        # ★ KEY FIX: folder — matches /folders/<ID> with ANY prefix path
+        #   covers: /folders/, /drive/folders/, /drive/u/0/folders/, etc.
+        r"/folders/([a-zA-Z0-9_-]{10,})",
+
+        # Query param: ?id=<ID> or &id=<ID>
+        r"[?&]id=([a-zA-Z0-9_-]{10,})",
+
+        # Open link: /open?id=<ID>
+        r"/open\?id=([a-zA-Z0-9_-]{10,})",
+
+        # Generic Google Docs: /document/d/<ID>, /spreadsheets/d/<ID>, etc.
+        r"/d/([a-zA-Z0-9_-]{10,})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _is_folder_url(url: str) -> bool:
+    """
+    Detect if a Drive URL points to a folder.
+
+    Handles all variants:
+    • /folders/<ID>
+    • /drive/folders/<ID>
+    • /drive/u/0/folders/<ID>
+    • /drive/u/1/folders/<ID>
+    """
+    return bool(re.search(r"/folders/", url, re.IGNORECASE))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,44 +289,69 @@ def _generate_thumbnail(file_path: str) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # ★ UNIVERSAL DRIVE URL EXTRACTOR
 #   Checks (in order):
-#   1. TEXT_LINK entities  → hyperlinked text (e.g. "Click here" → drive url)
+#   1. TEXT_LINK entities  → hyperlinked text (e.g. "Tawhid" → drive url)
 #   2. URL entities        → plain urls that Telegram auto-linked
-#   3. Regex on raw text   → urls Telegram didn't entity-fy (forwarded, etc.)
+#   3. Regex on raw text   → urls Telegram didn't entity-fy
+#
+#   ★ Also strips trailing punctuation that can corrupt URLs
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _clean_url(url: str) -> str:
+    """
+    Strip trailing characters that are NOT part of a URL
+    but may have been captured by regex or entity extraction.
+    """
+    # Strip trailing punctuation: ) ] > . , ; ! ? " '
+    return re.sub(r"[)>\].,;!?\"']+$", "", url.strip())
+
 
 def _extract_all_drive_urls(message: Message) -> list[str]:
     """
     Extract every unique Google Drive / Docs URL from a message using
     all three methods: TEXT_LINK entities, URL entities, regex on raw text.
     Works on normal text, captions, and forwarded messages.
+
+    ★ TEXT_LINK entities are prioritised — this is how hyperlinks like
+      'Tawhid' pointing to a Drive folder URL are captured.
     """
     seen: set[str] = set()
     urls: list[str] = []
 
-    def _add(url: str):
-        url = url.rstrip(")")   # strip trailing ) from markdown wrapping
-        if url not in seen and (
-            "drive.google.com" in url or "docs.google.com" in url
-        ):
+    def _add(url: str) -> None:
+        url = _clean_url(url)
+        if not url:
+            return
+        if url in seen:
+            return
+        if "drive.google.com" in url or "docs.google.com" in url:
             seen.add(url)
             urls.append(url)
+            LOGGER.debug(f"[GDL] URL extracted: {url}")
 
-    # ── 1 & 2: entity-based ──────────────────────────────────────────────
-    entities = message.entities or message.caption_entities or []
-    text     = message.text or message.caption or ""
+    # ── Gather entities from both text and caption ───────────────────────
+    entities = []
+    if message.entities:
+        entities.extend(message.entities)
+    if message.caption_entities:
+        entities.extend(message.caption_entities)
 
+    text = message.text or message.caption or ""
+
+    # ── 1. TEXT_LINK — hyperlinked text (highest priority) ───────────────
+    #   Example: "Tawhid" with URL drive.google.com/drive/folders/...
     for entity in entities:
         if entity.type == MessageEntityType.TEXT_LINK:
-            # hyperlinked text — url is stored directly on entity
             if entity.url:
                 _add(entity.url)
-        elif entity.type == MessageEntityType.URL:
-            # plain url embedded in message text
+
+    # ── 2. URL entity — plain URL Telegram auto-detected ─────────────────
+    for entity in entities:
+        if entity.type == MessageEntityType.URL:
             chunk = text[entity.offset: entity.offset + entity.length]
             _add(chunk)
 
-    # ── 3: regex fallback on raw text ────────────────────────────────────
-    #  catches urls in forwarded messages, bot API updates, etc.
+    # ── 3. Regex fallback — catches anything missed above ─────────────────
+    #   (forwarded messages, bot-API payloads, non-entity URLs, etc.)
     for match in _DRIVE_URL_RE.finditer(text):
         _add(match.group(0))
 
@@ -286,26 +374,6 @@ def _build_drive_service():
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
     )
     return build("drive", "v3", credentials=creds)
-
-
-def _extract_drive_id(url: str) -> str | None:
-    """Extract the file or folder ID from any Google Drive URL."""
-    patterns = [
-        r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/folders/([a-zA-Z0-9_-]+)",
-        r"[?&]id=([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
-        r"docs\.google\.com/\w+/d/([a-zA-Z0-9_-]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _is_folder_url(url: str) -> bool:
-    return "/folders/" in url
 
 
 def _get_file_metadata(service, file_id: str) -> dict:
@@ -574,7 +642,7 @@ async def _upload_to_telegram(
                 progress=_progress,
             )
 
-    # ── try specific type → fallback to document ────────────────────────
+    # ── try specific type → fallback to document ─────────────────────────
     try:
         await _send(media_type)
         return True
@@ -628,18 +696,28 @@ async def _process_gdl(client: Client, message: Message, url: str):
         )
         return
 
+    # ── Determine if folder ───────────────────────────────────────────────
+    is_folder = _is_folder_url(url)
+
     # ── Extract Drive ID ──────────────────────────────────────────────────
     file_id = _extract_drive_id(url)
     if not file_id:
+        LOGGER.error(f"[GDL] Failed to extract ID from URL: {url}")
         await message.reply_text(
             "❌ **Could not extract a Google Drive ID from the link.**\n\n"
             "Supported formats:\n"
             "• `https://drive.google.com/file/d/<ID>/view`\n"
             "• `https://drive.google.com/folders/<ID>`\n"
+            "• `https://drive.google.com/drive/folders/<ID>`\n"
             "• `https://drive.google.com/open?id=<ID>`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
+
+    LOGGER.info(
+        f"[GDL] Resolved — ID: {file_id} | "
+        f"Type: {'folder' if is_folder else 'file'} | URL: {url}"
+    )
 
     # ── Build Drive service ───────────────────────────────────────────────
     try:
@@ -659,7 +737,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
         )
         return
 
-    is_folder  = _is_folder_url(url)
     status_msg = await message.reply_text(
         "🔍 **Fetching file info from Google Drive…**",
         parse_mode=ParseMode.MARKDOWN,
@@ -765,7 +842,10 @@ async def _process_gdl(client: Client, message: Message, url: str):
                     )
                 finally:
                     if os.path.exists(local_path):
-                        os.remove(local_path)
+                        try:
+                            os.remove(local_path)
+                        except OSError:
+                            pass
 
             await status_msg.edit_text(
                 f"✅ **Folder download complete!**\n\n"
@@ -852,7 +932,10 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
             finally:
                 if os.path.exists(local_path):
-                    os.remove(local_path)
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
 
     except Exception as e:
         LOGGER.error(f"[GDL] Unhandled error: {e}")
@@ -915,13 +998,14 @@ def setup_gdl_handler(app: Client):
                 "**Supported links:**\n"
                 "• `https://drive.google.com/file/d/<ID>/view`\n"
                 "• `https://drive.google.com/folders/<ID>`\n"
+                "• `https://drive.google.com/drive/folders/<ID>`\n"
                 "• `https://drive.google.com/open?id=<ID>`\n\n"
                 "**Features:**\n"
                 "• Max file size: `2 GB`\n"
                 "• Google Docs → Office format\n"
                 "• Smart upload: video/audio/photo/animation/document\n"
                 "• Reply to a message with a Drive link\n"
-                "• Auto-detects ALL Drive links (hyperlinks, plain URLs, text)!\n\n"
+                "• Auto-detects hyperlinks, plain URLs, raw text!\n\n"
                 "**Example:**\n"
                 "`/gdl https://drive.google.com/file/d/1BxiM.../view`",
                 parse_mode=ParseMode.MARKDOWN,
@@ -937,20 +1021,13 @@ def setup_gdl_handler(app: Client):
             )
             return
 
-        LOGGER.info(f"[GDL] /gdl from {message.from_user.id}: {url}")
+        LOGGER.info(
+            f"[GDL] /gdl from user "
+            f"{getattr(message.from_user, 'id', '?')}: {url}"
+        )
         await _process_gdl(client, message, url)
 
     # ─── 2. Auto-detect Drive links in ANY message ────────────────────────
-    #
-    # ★ FIX: We now detect ALL three kinds of Drive URLs:
-    #   - TEXT_LINK  (hyperlinked text)
-    #   - URL entity (plain url that Telegram auto-linked)
-    #   - Regex match on raw text (forwarded / no entity)
-    #
-    # We use a broad filter (any message with text/caption OR entities)
-    # and let _extract_all_drive_urls do the real filtering.
-    # ─────────────────────────────────────────────────────────────────────
-
     _has_text_or_entities = filters.create(
         lambda _, __, m: bool(
             m.text or m.caption
@@ -968,12 +1045,9 @@ def setup_gdl_handler(app: Client):
         """
         Automatically detect Google Drive URLs in any message:
         - Plain Drive URLs (URL entity or raw text)
-        - Hyperlinked Drive URLs (TEXT_LINK entity)
+        - Hyperlinked Drive URLs (TEXT_LINK entity)   ← Tawhid-style links
         - Forwarded messages containing Drive URLs
-
-        Downloads and sends the file(s) automatically.
         """
-        # skip messages from the bot itself
         if message.from_user and message.from_user.is_self:
             return
 
