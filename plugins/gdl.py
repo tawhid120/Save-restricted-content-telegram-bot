@@ -1,7 +1,7 @@
 # Copyright @juktijol
 # Channel t.me/juktijol
 #
-# plugins/gdl.py — Google Drive Downloader via /gdl + Auto-detect hyperlinks
+# plugins/gdl.py — Google Drive Downloader via /gdl + Auto-detect ALL Drive links
 #
 # ✅ NO user account / phone number required — BOT_TOKEN only
 # ✅ Uses Pyrofork MTProto directly → up to 2 GB upload
@@ -9,7 +9,12 @@
 # ✅ Supports single files AND full folders (recursive)
 # ✅ Real-time progress bar for both download and upload phases
 # ✅ Cleans up temp files after every operation
-# ✅ AUTO-DETECTS Drive links hidden inside hyperlinked text (TEXT_LINK)
+# ✅ AUTO-DETECTS Drive links in:
+#       - Plain URL entities (MessageEntityType.URL)
+#       - Hyperlinked text (MessageEntityType.TEXT_LINK)
+#       - Raw text (regex fallback)
+#       - Forwarded messages
+#       - Caption text
 # ✅ SMART UPLOAD — photo/video/audio/animation/document based on MIME type
 # ✅ Fallback to document if specific media upload fails
 # ✅ Plugs straight into the existing project structure
@@ -80,6 +85,15 @@ ANIMATION_MIMES      = {"image/gif"}
 
 # Telegram sends photos only up to 10 MB
 PHOTO_SIZE_LIMIT = 10 * 1024 * 1024
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DRIVE URL REGEX — matches all known Google Drive / Docs URL formats
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DRIVE_URL_RE = re.compile(
+    r"https?://(?:drive|docs)\.google\.com/\S+",
+    re.IGNORECASE,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,7 +215,6 @@ def _generate_thumbnail(file_path: str) -> str | None:
             return thumb
     except Exception:
         pass
-    # cleanup on failure
     try:
         if os.path.exists(thumb):
             os.remove(thumb)
@@ -211,33 +224,48 @@ def _generate_thumbnail(file_path: str) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENTITY / HYPERLINK URL EXTRACTION
+# ★ UNIVERSAL DRIVE URL EXTRACTOR
+#   Checks (in order):
+#   1. TEXT_LINK entities  → hyperlinked text (e.g. "Click here" → drive url)
+#   2. URL entities        → plain urls that Telegram auto-linked
+#   3. Regex on raw text   → urls Telegram didn't entity-fy (forwarded, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_drive_urls_from_entities(
-    message: Message,
-    text_link_only: bool = False,
-) -> list[str]:
+def _extract_all_drive_urls(message: Message) -> list[str]:
     """
-    Pull Google Drive URLs out of message entities.
-
-    text_link_only = True  → only TEXT_LINK (hyperlinks hidden in text)
-    text_link_only = False → also plain URL entities
+    Extract every unique Google Drive / Docs URL from a message using
+    all three methods: TEXT_LINK entities, URL entities, regex on raw text.
+    Works on normal text, captions, and forwarded messages.
     """
+    seen: set[str] = set()
     urls: list[str] = []
+
+    def _add(url: str):
+        url = url.rstrip(")")   # strip trailing ) from markdown wrapping
+        if url not in seen and (
+            "drive.google.com" in url or "docs.google.com" in url
+        ):
+            seen.add(url)
+            urls.append(url)
+
+    # ── 1 & 2: entity-based ──────────────────────────────────────────────
     entities = message.entities or message.caption_entities or []
     text     = message.text or message.caption or ""
 
     for entity in entities:
-        url = None
         if entity.type == MessageEntityType.TEXT_LINK:
-            url = entity.url
-        elif not text_link_only and entity.type == MessageEntityType.URL:
-            url = text[entity.offset : entity.offset + entity.length]
+            # hyperlinked text — url is stored directly on entity
+            if entity.url:
+                _add(entity.url)
+        elif entity.type == MessageEntityType.URL:
+            # plain url embedded in message text
+            chunk = text[entity.offset: entity.offset + entity.length]
+            _add(chunk)
 
-        if url and ("drive.google.com" in url or "docs.google.com" in url):
-            if url not in urls:
-                urls.append(url)
+    # ── 3: regex fallback on raw text ────────────────────────────────────
+    #  catches urls in forwarded messages, bot API updates, etc.
+    for match in _DRIVE_URL_RE.finditer(text):
+        _add(match.group(0))
 
     return urls
 
@@ -267,6 +295,7 @@ def _extract_drive_id(url: str) -> str | None:
         r"drive\.google\.com/folders/([a-zA-Z0-9_-]+)",
         r"[?&]id=([a-zA-Z0-9_-]+)",
         r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
+        r"docs\.google\.com/\w+/d/([a-zA-Z0-9_-]+)",
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -560,7 +589,6 @@ async def _upload_to_telegram(
                 LOGGER.info(
                     f"[GDL] Falling back to 'document' for '{file_name}'"
                 )
-                # reset progress timer for fallback attempt
                 start_ts[0]  = time()
                 last_edit[0] = 0.0
                 await _send("document")
@@ -702,7 +730,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
                 )
 
                 try:
-                    # Download
                     local_path, eff_mime = await _download_drive_file(
                         service, item_id, item_name,
                         item_mime, local_path, status_msg,
@@ -716,7 +743,6 @@ async def _process_gdl(client: Client, message: Message, url: str):
                         f"_Downloaded by @juktijol Bot_"
                     )
 
-                    # Upload (smart — media type aware)
                     ok = await _upload_to_telegram(
                         client, chat_id, local_path,
                         os.path.basename(local_path), caption,
@@ -868,36 +894,17 @@ def setup_gdl_handler(app: Client):
             ):
                 url = candidate
 
-        # B) Try entities in this message (hyperlinked URL)
+        # B) Try ALL entity types + regex in this message
         if not url:
-            found = _extract_drive_urls_from_entities(
-                message, text_link_only=False,
-            )
+            found = _extract_all_drive_urls(message)
             if found:
                 url = found[0]
 
-        # C) Try replied-to message
+        # C) Try replied-to message — ALL methods
         if not url and message.reply_to_message:
-            # check entities
-            found = _extract_drive_urls_from_entities(
-                message.reply_to_message, text_link_only=False,
-            )
+            found = _extract_all_drive_urls(message.reply_to_message)
             if found:
                 url = found[0]
-            else:
-                # check plain text in reply
-                rtext = (
-                    message.reply_to_message.text
-                    or message.reply_to_message.caption
-                    or ""
-                )
-                for word in rtext.split():
-                    if (
-                        "drive.google.com" in word
-                        or "docs.google.com" in word
-                    ):
-                        url = word
-                        break
 
         # D) No URL found → show usage
         if not url:
@@ -914,7 +921,7 @@ def setup_gdl_handler(app: Client):
                 "• Google Docs → Office format\n"
                 "• Smart upload: video/audio/photo/animation/document\n"
                 "• Reply to a message with a Drive link\n"
-                "• Hyperlinked Drive links are auto-detected!\n\n"
+                "• Auto-detects ALL Drive links (hyperlinks, plain URLs, text)!\n\n"
                 "**Example:**\n"
                 "`/gdl https://drive.google.com/file/d/1BxiM.../view`",
                 parse_mode=ParseMode.MARKDOWN,
@@ -922,7 +929,6 @@ def setup_gdl_handler(app: Client):
             )
             return
 
-        # Rudimentary validation
         if "drive.google.com" not in url and "docs.google.com" not in url:
             await message.reply_text(
                 "❌ **That doesn't look like a Google Drive link.**\n\n"
@@ -934,42 +940,56 @@ def setup_gdl_handler(app: Client):
         LOGGER.info(f"[GDL] /gdl from {message.from_user.id}: {url}")
         await _process_gdl(client, message, url)
 
-    # ─── 2. Auto-detect Drive hyperlinks in any message ──────────────────
-    _has_entities = filters.create(
-        lambda _, __, m: bool(m.entities or m.caption_entities),
+    # ─── 2. Auto-detect Drive links in ANY message ────────────────────────
+    #
+    # ★ FIX: We now detect ALL three kinds of Drive URLs:
+    #   - TEXT_LINK  (hyperlinked text)
+    #   - URL entity (plain url that Telegram auto-linked)
+    #   - Regex match on raw text (forwarded / no entity)
+    #
+    # We use a broad filter (any message with text/caption OR entities)
+    # and let _extract_all_drive_urls do the real filtering.
+    # ─────────────────────────────────────────────────────────────────────
+
+    _has_text_or_entities = filters.create(
+        lambda _, __, m: bool(
+            m.text or m.caption
+            or m.entities or m.caption_entities
+        )
     )
 
     @app.on_message(
-        _has_entities
+        _has_text_or_entities
         & (filters.private | filters.group)
         & ~filters.command("gdl", prefixes=COMMAND_PREFIX),
         group=1,
     )
     async def auto_detect_drive_links(client: Client, message: Message):
         """
-        Automatically detect Google Drive URLs hidden inside
-        hyperlinked text (TEXT_LINK entities) and download them.
+        Automatically detect Google Drive URLs in any message:
+        - Plain Drive URLs (URL entity or raw text)
+        - Hyperlinked Drive URLs (TEXT_LINK entity)
+        - Forwarded messages containing Drive URLs
+
+        Downloads and sends the file(s) automatically.
         """
         # skip messages from the bot itself
         if message.from_user and message.from_user.is_self:
             return
 
-        # Only look at TEXT_LINK entities (hyperlinks embedded in text)
-        urls = _extract_drive_urls_from_entities(
-            message, text_link_only=True,
-        )
+        urls = _extract_all_drive_urls(message)
         if not urls:
             return
 
         sender = getattr(message.from_user, "id", "?")
         LOGGER.info(
-            f"[GDL] Auto-detected {len(urls)} Drive hyperlink(s) "
-            f"from user {sender}"
+            f"[GDL] Auto-detected {len(urls)} Drive URL(s) "
+            f"from user {sender}: {urls}"
         )
 
         for url in urls:
             await _process_gdl(client, message, url)
 
     LOGGER.info(
-        "[GDL] /gdl command + auto-detect hyperlink handlers registered."
+        "[GDL] /gdl command + universal auto-detect handlers registered."
     )
