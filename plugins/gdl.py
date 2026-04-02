@@ -1,24 +1,22 @@
 # Copyright @juktijol
 # Channel t.me/juktijol
 #
-# plugins/gdl.py — Google Drive Downloader via /gdl + Auto-detect ALL Drive links
+# plugins/gdl.py — Google Drive Downloader
 #
+# ✅ তিনটা পদ্ধতিতে কাজ করে:
+#    1. /gdl <url>          — সরাসরি URL দিয়ে
+#    2. /gdl               — বট লিংক চাইবে, তারপর কাজ করবে
+#    3. reply + /gdl       — forwarded/copied মেসেজে reply করে
+#
+# ❌ Command ছাড়া auto-detect সম্পূর্ণ বন্ধ
 # ✅ NO user account / phone number required — BOT_TOKEN only
 # ✅ Uses Pyrofork MTProto directly → up to 2 GB upload
 # ✅ Downloads the file to disk from Google Drive, then uploads via MTProto
 # ✅ Supports single files AND full folders (recursive)
 # ✅ Real-time progress bar for both download and upload phases
 # ✅ Cleans up temp files after every operation
-# ✅ AUTO-DETECTS Drive links in:
-#       - Plain URL entities (MessageEntityType.URL)
-#       - Hyperlinked text (MessageEntityType.TEXT_LINK)
-#       - Raw text (regex fallback)
-#       - Forwarded messages
-#       - Caption text
 # ✅ SMART UPLOAD — photo/video/audio/animation/document based on MIME type
 # ✅ Fallback to document if specific media upload fails
-# ✅ /drive/folders/ AND /folders/ both supported
-# ✅ Plugs straight into the existing project structure
 
 import os
 import re
@@ -32,7 +30,6 @@ from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageEntityType
-from pyrogram.handlers import MessageHandler
 
 from config import COMMAND_PREFIX
 from utils import LOGGER
@@ -46,19 +43,28 @@ try:
 except ImportError:
     GDRIVE_AVAILABLE = False
     LOGGER.warning(
-        "[GDL] google-api-python-client not installed — /gdl will be disabled."
+        "[GDL] google-api-python-client not installed — /gdl disabled."
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-SERVICE_ACCOUNT_FILE = "service_account_key.json"   # place in project root
-DOWNLOAD_DIR         = "gdl_downloads"               # temp directory
-MAX_FILE_SIZE_BYTES  = 2 * 1024 * 1024 * 1024        # 2 GB hard limit
-PROGRESS_UPDATE_SEC  = 3                              # seconds between edits
+SERVICE_ACCOUNT_FILE  = "service_account_key.json"   # project root এ রাখুন
+DOWNLOAD_DIR          = "gdl_downloads"               # temp directory
+MAX_FILE_SIZE_BYTES   = 2 * 1024 * 1024 * 1024        # 2 GB hard limit
+PROGRESS_UPDATE_SEC   = 3                              # সেকেন্ডে progress update
+WAIT_FOR_URL_TIMEOUT  = 60                             # URL এর জন্য অপেক্ষা (সেকেন্ড)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PENDING USERS TRACKER
+# যারা /gdl দিয়েছে কিন্তু URL দেয়নি তাদের track করা হয়
+# Format: { (chat_id, user_id): status_message }
+# ─────────────────────────────────────────────────────────────────────────────
+
+_pending_url_requests: dict[tuple[int, int], Message] = {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MEDIA TYPE CONSTANTS
@@ -84,11 +90,11 @@ AUDIO_EXTENSIONS = {
 ANIMATION_EXTENSIONS = {".gif"}
 ANIMATION_MIMES      = {"image/gif"}
 
-# Telegram sends photos only up to 10 MB
+# Telegram ফটো পাঠাতে সর্বোচ্চ 10 MB
 PHOTO_SIZE_LIMIT = 10 * 1024 * 1024
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DRIVE URL REGEX — matches all known Google Drive / Docs URL formats
+# DRIVE URL REGEX
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DRIVE_URL_RE = re.compile(
@@ -97,48 +103,28 @@ _DRIVE_URL_RE = re.compile(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ★ FIX: DRIVE ID + FOLDER DETECTION
-#   Handles ALL known URL formats including /drive/folders/ variant
-#
-#   Supported URL formats:
-#   • https://drive.google.com/file/d/<ID>/view
-#   • https://drive.google.com/drive/folders/<ID>        ← এটা আগে মিস হতো!
-#   • https://drive.google.com/folders/<ID>
-#   • https://drive.google.com/open?id=<ID>
-#   • https://drive.google.com/drive/u/0/folders/<ID>    ← user-index variant
-#   • https://docs.google.com/document/d/<ID>/edit
+# DRIVE ID + FOLDER DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_drive_id(url: str) -> str | None:
     """
-    Extract the file or folder ID from ANY Google Drive / Docs URL.
+    যেকোনো Google Drive / Docs URL থেকে file/folder ID বের করে।
 
-    Pattern priority (most specific → least specific):
-    1. /file/d/<ID>
-    2. /folders/<ID>         — catches both /folders/ and /drive/folders/
-                               and /drive/u/0/folders/ etc.
-    3. ?id=<ID> or &id=<ID>
-    4. /open?id=<ID>
-    5. /d/<ID>               — generic docs pattern
+    Supported formats:
+    • https://drive.google.com/file/d/<ID>/view
+    • https://drive.google.com/folders/<ID>
+    • https://drive.google.com/drive/folders/<ID>
+    • https://drive.google.com/drive/u/0/folders/<ID>
+    • https://drive.google.com/open?id=<ID>
+    • https://docs.google.com/document/d/<ID>/edit
     """
     patterns = [
-        # Single file: /file/d/<ID>
-        r"/file/d/([a-zA-Z0-9_-]{10,})",
-
-        # ★ KEY FIX: folder — matches /folders/<ID> with ANY prefix path
-        #   covers: /folders/, /drive/folders/, /drive/u/0/folders/, etc.
-        r"/folders/([a-zA-Z0-9_-]{10,})",
-
-        # Query param: ?id=<ID> or &id=<ID>
-        r"[?&]id=([a-zA-Z0-9_-]{10,})",
-
-        # Open link: /open?id=<ID>
-        r"/open\?id=([a-zA-Z0-9_-]{10,})",
-
-        # Generic Google Docs: /document/d/<ID>, /spreadsheets/d/<ID>, etc.
-        r"/d/([a-zA-Z0-9_-]{10,})",
+        r"/file/d/([a-zA-Z0-9_-]{10,})",         # single file
+        r"/folders/([a-zA-Z0-9_-]{10,})",          # folder (সব variant)
+        r"[?&]id=([a-zA-Z0-9_-]{10,})",            # query param
+        r"/open\?id=([a-zA-Z0-9_-]{10,})",         # open link
+        r"/d/([a-zA-Z0-9_-]{10,})",                # generic docs
     ]
-
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
@@ -147,23 +133,16 @@ def _extract_drive_id(url: str) -> str | None:
 
 
 def _is_folder_url(url: str) -> bool:
-    """
-    Detect if a Drive URL points to a folder.
-
-    Handles all variants:
-    • /folders/<ID>
-    • /drive/folders/<ID>
-    • /drive/u/0/folders/<ID>
-    • /drive/u/1/folders/<ID>
-    """
+    """URL টি folder এর কিনা বের করে।"""
     return bool(re.search(r"/folders/", url, re.IGNORECASE))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS — readable sizes / times / bar
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _readable_size(size: float) -> str:
+    """Bytes কে readable format এ convert করে।"""
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
             return f"{size:.2f} {unit}"
@@ -172,6 +151,7 @@ def _readable_size(size: float) -> str:
 
 
 def _readable_time(seconds: float) -> str:
+    """Seconds কে readable format এ convert করে।"""
     seconds = int(seconds)
     if seconds < 60:
         return f"{seconds}s"
@@ -183,8 +163,72 @@ def _readable_time(seconds: float) -> str:
 
 
 def _progress_bar(pct: float, length: int = 20) -> str:
+    """Progress bar তৈরি করে।"""
     filled = int(length * pct / 100)
     return "▓" * filled + "░" * (length - filled)
+
+
+def _clean_url(url: str) -> str:
+    """URL এর শেষে থাকা অদরকারী punctuation সরায়।"""
+    return re.sub(r"[)>\].,;!?\"']+$", "", url.strip())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DRIVE URL EXTRACTOR (from message entities + regex)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_all_drive_urls(message: Message) -> list[str]:
+    """
+    একটি মেসেজ থেকে সব Google Drive URL বের করে।
+
+    তিনটা পদ্ধতিতে check করে:
+    1. TEXT_LINK entity  — hyperlinked text (যেমন: "Tawhid" → drive url)
+    2. URL entity        — plain URL যা Telegram auto-detect করেছে
+    3. Regex fallback    — বাকি সব
+
+    ⚠️  এই function শুধু /gdl command এর ভেতরে ব্যবহার হবে।
+        Auto-detect এর জন্য একদম আলাদা কোনো handler নেই।
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    def _add(url: str) -> None:
+        url = _clean_url(url)
+        if not url:
+            return
+        if url in seen:
+            return
+        # শুধু Drive/Docs URL নেব
+        if "drive.google.com" in url or "docs.google.com" in url:
+            seen.add(url)
+            urls.append(url)
+            LOGGER.debug(f"[GDL] URL found: {url}")
+
+    # message এর text + caption উভয় থেকে entities নাও
+    entities = []
+    if message.entities:
+        entities.extend(message.entities)
+    if message.caption_entities:
+        entities.extend(message.caption_entities)
+
+    text = message.text or message.caption or ""
+
+    # ── 1. TEXT_LINK entity (সর্বোচ্চ priority) ─────────────────────────
+    for entity in entities:
+        if entity.type == MessageEntityType.TEXT_LINK and entity.url:
+            _add(entity.url)
+
+    # ── 2. URL entity ────────────────────────────────────────────────────
+    for entity in entities:
+        if entity.type == MessageEntityType.URL:
+            chunk = text[entity.offset: entity.offset + entity.length]
+            _add(chunk)
+
+    # ── 3. Regex fallback ────────────────────────────────────────────────
+    for match in _DRIVE_URL_RE.finditer(text):
+        _add(match.group(0))
+
+    return urls
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,16 +237,13 @@ def _progress_bar(pct: float, length: int = 20) -> str:
 
 def _detect_media_type(file_path: str, mime_type: str = "") -> str:
     """
-    Return one of: photo, video, audio, animation, document
-    based on extension + MIME type.
+    file এর type detect করে: photo, video, audio, animation, document
     """
     ext = os.path.splitext(file_path)[1].lower()
 
-    # GIF / animation
     if ext in ANIMATION_EXTENSIONS or mime_type in ANIMATION_MIMES:
         return "animation"
 
-    # Photo (must be ≤ 10 MB for Telegram)
     if ext in PHOTO_EXTENSIONS or mime_type in PHOTO_MIMES:
         try:
             if os.path.getsize(file_path) <= PHOTO_SIZE_LIMIT:
@@ -211,11 +252,9 @@ def _detect_media_type(file_path: str, mime_type: str = "") -> str:
             pass
         return "document"
 
-    # Video
     if ext in VIDEO_EXTENSIONS or mime_type.startswith("video/"):
         return "video"
 
-    # Audio
     if ext in AUDIO_EXTENSIONS or mime_type.startswith("audio/"):
         return "audio"
 
@@ -223,7 +262,7 @@ def _detect_media_type(file_path: str, mime_type: str = "") -> str:
 
 
 def _get_video_metadata(file_path: str) -> dict:
-    """Extract duration / width / height via ffprobe (graceful fail)."""
+    """ffprobe দিয়ে video metadata বের করে।"""
     try:
         result = subprocess.run(
             [
@@ -248,7 +287,7 @@ def _get_video_metadata(file_path: str) -> dict:
 
 
 def _get_audio_duration(file_path: str) -> int:
-    """Extract audio duration via ffprobe (graceful fail)."""
+    """ffprobe দিয়ে audio duration বের করে।"""
     try:
         result = subprocess.run(
             [
@@ -264,7 +303,7 @@ def _get_audio_duration(file_path: str) -> int:
 
 
 def _generate_thumbnail(file_path: str) -> str | None:
-    """Generate a video thumbnail via ffmpeg (returns path or None)."""
+    """ffmpeg দিয়ে video thumbnail তৈরি করে।"""
     thumb = file_path + "_thumb.jpg"
     try:
         subprocess.run(
@@ -287,87 +326,15 @@ def _generate_thumbnail(file_path: str) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ★ UNIVERSAL DRIVE URL EXTRACTOR
-#   Checks (in order):
-#   1. TEXT_LINK entities  → hyperlinked text (e.g. "Tawhid" → drive url)
-#   2. URL entities        → plain urls that Telegram auto-linked
-#   3. Regex on raw text   → urls Telegram didn't entity-fy
-#
-#   ★ Also strips trailing punctuation that can corrupt URLs
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _clean_url(url: str) -> str:
-    """
-    Strip trailing characters that are NOT part of a URL
-    but may have been captured by regex or entity extraction.
-    """
-    # Strip trailing punctuation: ) ] > . , ; ! ? " '
-    return re.sub(r"[)>\].,;!?\"']+$", "", url.strip())
-
-
-def _extract_all_drive_urls(message: Message) -> list[str]:
-    """
-    Extract every unique Google Drive / Docs URL from a message using
-    all three methods: TEXT_LINK entities, URL entities, regex on raw text.
-    Works on normal text, captions, and forwarded messages.
-
-    ★ TEXT_LINK entities are prioritised — this is how hyperlinks like
-      'Tawhid' pointing to a Drive folder URL are captured.
-    """
-    seen: set[str] = set()
-    urls: list[str] = []
-
-    def _add(url: str) -> None:
-        url = _clean_url(url)
-        if not url:
-            return
-        if url in seen:
-            return
-        if "drive.google.com" in url or "docs.google.com" in url:
-            seen.add(url)
-            urls.append(url)
-            LOGGER.debug(f"[GDL] URL extracted: {url}")
-
-    # ── Gather entities from both text and caption ───────────────────────
-    entities = []
-    if message.entities:
-        entities.extend(message.entities)
-    if message.caption_entities:
-        entities.extend(message.caption_entities)
-
-    text = message.text or message.caption or ""
-
-    # ── 1. TEXT_LINK — hyperlinked text (highest priority) ───────────────
-    #   Example: "Tawhid" with URL drive.google.com/drive/folders/...
-    for entity in entities:
-        if entity.type == MessageEntityType.TEXT_LINK:
-            if entity.url:
-                _add(entity.url)
-
-    # ── 2. URL entity — plain URL Telegram auto-detected ─────────────────
-    for entity in entities:
-        if entity.type == MessageEntityType.URL:
-            chunk = text[entity.offset: entity.offset + entity.length]
-            _add(chunk)
-
-    # ── 3. Regex fallback — catches anything missed above ─────────────────
-    #   (forwarded messages, bot-API payloads, non-entity URLs, etc.)
-    for match in _DRIVE_URL_RE.finditer(text):
-        _add(match.group(0))
-
-    return urls
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # GOOGLE DRIVE UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_drive_service():
-    """Build an authenticated Google Drive service from service account."""
+    """Service account দিয়ে Google Drive authenticate করে।"""
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
         raise FileNotFoundError(
-            f"Service account key not found: {SERVICE_ACCOUNT_FILE}\n"
-            "Place your Google service account JSON in the project root."
+            f"Service account key পাওয়া যায়নি: {SERVICE_ACCOUNT_FILE}\n"
+            "Google service account JSON টি project root এ রাখুন।"
         )
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE,
@@ -377,6 +344,7 @@ def _build_drive_service():
 
 
 def _get_file_metadata(service, file_id: str) -> dict:
+    """Drive file এর metadata নিয়ে আসে।"""
     return service.files().get(
         fileId=file_id,
         fields="id,name,mimeType,size",
@@ -387,7 +355,7 @@ def _get_file_metadata(service, file_id: str) -> dict:
 def _list_folder_recursive(
     service, folder_id: str, parent_path: str = "",
 ) -> list[dict]:
-    """Recursively list all non-folder files inside a Drive folder."""
+    """Drive folder এর সব file recursively list করে।"""
     results: list[dict] = []
     query      = f"'{folder_id}' in parents and trashed=false"
     page_token = None
@@ -423,8 +391,8 @@ def _list_folder_recursive(
 
 def _is_google_doc(mime_type: str) -> tuple[bool, str, str]:
     """
-    Returns (is_google_doc, export_mime, extension).
-    Google Workspace files must be exported rather than downloaded directly.
+    Google Workspace file কিনা check করে।
+    Returns: (is_google_doc, export_mime, extension)
     """
     export_map = {
         "application/vnd.google-apps.document": (
@@ -463,13 +431,14 @@ async def _download_drive_file(
     status_msg: Message,
 ) -> tuple[str, str]:
     """
-    Download one Drive file to local_path.
-    Returns (final_local_path, effective_mime_type).
+    Drive থেকে একটি file download করে local disk এ সেভ করে।
+    Returns: (final_local_path, effective_mime_type)
     """
     is_doc, export_mime, ext = _is_google_doc(mime_type)
     effective_mime = mime_type
 
     if is_doc:
+        # Google Docs export করতে হবে
         if not file_name.endswith(ext):
             file_name += ext
         local_path     = os.path.splitext(local_path)[0] + ext
@@ -478,6 +447,7 @@ async def _download_drive_file(
         )
         effective_mime = export_mime
     else:
+        # সাধারণ file সরাসরি download
         request = service.files().get_media(
             fileId=file_id, supportsAllDrives=True,
         )
@@ -506,7 +476,7 @@ async def _download_drive_file(
 
             try:
                 await status_msg.edit_text(
-                    f"📥 **Downloading from Google Drive…**\n\n"
+                    f"📥 **Google Drive থেকে Downloading…**\n\n"
                     f"`[{_progress_bar(pct)}]` {pct:.1f}%\n\n"
                     f"📦 **Downloaded:** `{_readable_size(downloaded)}`\n"
                     f"⚡ **Speed:** `{_readable_size(speed)}/s`\n"
@@ -535,9 +505,9 @@ async def _upload_to_telegram(
     mime_type: str = "",
 ) -> bool:
     """
-    Upload local_path to Telegram using the correct send method
-    based on the detected media type.
-    Falls back to send_document if the specific type fails.
+    Local file টি Telegram এ upload করে।
+    Media type অনুযায়ী সঠিক method ব্যবহার করে।
+    ব্যর্থ হলে document হিসেবে fallback করে।
     """
     media_type = _detect_media_type(local_path, mime_type)
     start_ts   = [time()]
@@ -548,7 +518,7 @@ async def _upload_to_telegram(
         f"(mime={mime_type}, ext={os.path.splitext(file_name)[1]})"
     )
 
-    # ── progress callback ────────────────────────────────────────────────
+    # ── Progress callback ────────────────────────────────────────────────
     async def _progress(current: int, total: int):
         now = time()
         if now - last_edit[0] < PROGRESS_UPDATE_SEC and current < total:
@@ -559,7 +529,7 @@ async def _upload_to_telegram(
         pct     = (current / total * 100) if total > 0 else 0
         try:
             await status_msg.edit_text(
-                f"📤 **Uploading to Telegram…** `[{media_type}]`\n\n"
+                f"📤 **Telegram এ Uploading…** `[{media_type}]`\n\n"
                 f"`[{_progress_bar(pct)}]` {pct:.1f}%\n\n"
                 f"📦 `{_readable_size(current)}` / "
                 f"`{_readable_size(total)}`\n"
@@ -574,7 +544,7 @@ async def _upload_to_telegram(
 
     thumb_path = None
 
-    # ── send helper ──────────────────────────────────────────────────────
+    # ── Send helper ──────────────────────────────────────────────────────
     async def _send(mtype: str) -> None:
         nonlocal thumb_path
 
@@ -632,7 +602,8 @@ async def _upload_to_telegram(
                 progress=_progress,
             )
 
-        else:  # document (default)
+        else:
+            # Default: document
             await client.send_document(
                 chat_id=chat_id,
                 document=local_path,
@@ -642,15 +613,14 @@ async def _upload_to_telegram(
                 progress=_progress,
             )
 
-    # ── try specific type → fallback to document ─────────────────────────
+    # ── Try specific type → fallback to document ─────────────────────────
     try:
         await _send(media_type)
         return True
 
     except Exception as e:
         LOGGER.warning(
-            f"[GDL] Upload as '{media_type}' failed for "
-            f"'{file_name}': {e}"
+            f"[GDL] Upload as '{media_type}' failed for '{file_name}': {e}"
         )
         if media_type != "document":
             try:
@@ -674,11 +644,14 @@ async def _upload_to_telegram(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORE HANDLER
+# CORE PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _process_gdl(client: Client, message: Message, url: str):
-    """Full pipeline: validate → metadata → download → upload → cleanup."""
+    """
+    সম্পূর্ণ pipeline:
+    validate → metadata → download → upload → cleanup
+    """
     user_id = (
         message.from_user.id if message.from_user
         else message.sender_chat.id if message.sender_chat
@@ -686,25 +659,24 @@ async def _process_gdl(client: Client, message: Message, url: str):
     )
     chat_id = message.chat.id
 
-    # ── Validate Google API ───────────────────────────────────────────────
+    # ── Google API available? ─────────────────────────────────────────────
     if not GDRIVE_AVAILABLE:
         await message.reply_text(
-            "❌ **Google Drive support is not available.**\n\n"
-            "Install required packages:\n"
+            "❌ **Google Drive support উপলব্ধ নেই।**\n\n"
+            "প্রয়োজনীয় package install করুন:\n"
             "`pip install google-api-python-client google-auth-oauthlib`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    # ── Determine if folder ───────────────────────────────────────────────
     is_folder = _is_folder_url(url)
 
-    # ── Extract Drive ID ──────────────────────────────────────────────────
+    # ── Drive ID বের করো ─────────────────────────────────────────────────
     file_id = _extract_drive_id(url)
     if not file_id:
-        LOGGER.error(f"[GDL] Failed to extract ID from URL: {url}")
+        LOGGER.error(f"[GDL] ID extract করা গেল না URL থেকে: {url}")
         await message.reply_text(
-            "❌ **Could not extract a Google Drive ID from the link.**\n\n"
+            "❌ **Google Drive ID বের করা যায়নি।**\n\n"
             "Supported formats:\n"
             "• `https://drive.google.com/file/d/<ID>/view`\n"
             "• `https://drive.google.com/folders/<ID>`\n"
@@ -719,40 +691,40 @@ async def _process_gdl(client: Client, message: Message, url: str):
         f"Type: {'folder' if is_folder else 'file'} | URL: {url}"
     )
 
-    # ── Build Drive service ───────────────────────────────────────────────
+    # ── Drive service তৈরি করো ───────────────────────────────────────────
     try:
         service = await asyncio.get_event_loop().run_in_executor(
             None, _build_drive_service,
         )
     except FileNotFoundError as e:
         await message.reply_text(
-            f"❌ **Service account key not found!**\n\n`{e}`",
+            f"❌ **Service account key পাওয়া যায়নি!**\n\n`{e}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     except Exception as e:
         await message.reply_text(
-            f"❌ **Failed to authenticate with Google Drive.**\n\n`{e}`",
+            f"❌ **Google Drive authenticate করা যায়নি।**\n\n`{e}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     status_msg = await message.reply_text(
-        "🔍 **Fetching file info from Google Drive…**",
+        "🔍 **Google Drive থেকে file info নিয়ে আসা হচ্ছে…**",
         parse_mode=ParseMode.MARKDOWN,
     )
 
     try:
         if is_folder:
-            # ── FOLDER mode ───────────────────────────────────────────────
+            # ── FOLDER MODE ───────────────────────────────────────────────
             folder_meta = await asyncio.get_event_loop().run_in_executor(
                 None, _get_file_metadata, service, file_id,
             )
             folder_name = folder_meta.get("name", "Untitled Folder")
 
             await status_msg.edit_text(
-                f"📁 **Scanning folder:** `{folder_name}`\n"
-                "Please wait…",
+                f"📁 **Folder scan করা হচ্ছে:** `{folder_name}`\n"
+                "অপেক্ষা করুন…",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -762,7 +734,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
             if not files:
                 await status_msg.edit_text(
-                    f"🤷 **Folder `{folder_name}` is empty.**",
+                    f"🤷 **Folder `{folder_name}` খালি।**",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 return
@@ -770,7 +742,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
             total_size = sum(int(f.get("size", 0)) for f in files)
             if total_size > MAX_FILE_SIZE_BYTES:
                 await status_msg.edit_text(
-                    f"❌ **Folder is too large to send.**\n\n"
+                    f"❌ **Folder অনেক বড়, পাঠানো সম্ভব নয়।**\n\n"
                     f"Total size: `{_readable_size(total_size)}`\n"
                     f"Limit: `{_readable_size(MAX_FILE_SIZE_BYTES)}`",
                     parse_mode=ParseMode.MARKDOWN,
@@ -779,9 +751,9 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
             await status_msg.edit_text(
                 f"📁 **Folder:** `{folder_name}`\n"
-                f"📊 **Files found:** `{len(files)}`\n"
+                f"📊 **Files:** `{len(files)}`\n"
                 f"📦 **Total size:** `{_readable_size(total_size)}`\n\n"
-                "Starting download…",
+                "Download শুরু হচ্ছে…",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -832,11 +804,11 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
                 except Exception as item_err:
                     LOGGER.error(
-                        f"[GDL] Failed to process '{item_name}': {item_err}"
+                        f"[GDL] '{item_name}' process করতে ব্যর্থ: {item_err}"
                     )
                     fail_count += 1
                     await message.reply_text(
-                        f"⚠️ **Skipped** `{item_name}`\n"
+                        f"⚠️ **Skip করা হয়েছে:** `{item_name}`\n"
                         f"`{str(item_err)[:150]}`",
                         parse_mode=ParseMode.MARKDOWN,
                     )
@@ -848,15 +820,15 @@ async def _process_gdl(client: Client, message: Message, url: str):
                             pass
 
             await status_msg.edit_text(
-                f"✅ **Folder download complete!**\n\n"
+                f"✅ **Folder download সম্পন্ন!**\n\n"
                 f"📁 `{folder_name}`\n"
-                f"✅ Sent: `{success_count}`\n"
-                f"❌ Failed: `{fail_count}`",
+                f"✅ সফল: `{success_count}`\n"
+                f"❌ ব্যর্থ: `{fail_count}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
         else:
-            # ── SINGLE FILE mode ──────────────────────────────────────────
+            # ── SINGLE FILE MODE ──────────────────────────────────────────
             meta      = await asyncio.get_event_loop().run_in_executor(
                 None, _get_file_metadata, service, file_id,
             )
@@ -867,7 +839,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
             is_doc, _, _ = _is_google_doc(mime_type)
             if not is_doc and file_size > MAX_FILE_SIZE_BYTES:
                 await status_msg.edit_text(
-                    f"❌ **File is too large to send via Telegram.**\n\n"
+                    f"❌ **File অনেক বড়, Telegram এ পাঠানো সম্ভব নয়।**\n\n"
                     f"Size: `{_readable_size(file_size)}`\n"
                     f"Limit: `{_readable_size(MAX_FILE_SIZE_BYTES)}`",
                     parse_mode=ParseMode.MARKDOWN,
@@ -877,7 +849,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
             await status_msg.edit_text(
                 f"📄 **{file_name}**\n"
                 f"📦 Size: `{_readable_size(file_size)}`\n\n"
-                "Downloading from Google Drive…",
+                "Google Drive থেকে downloading…",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -896,7 +868,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
                 if actual_size > MAX_FILE_SIZE_BYTES:
                     await status_msg.edit_text(
-                        f"❌ **Exported file is too large:** "
+                        f"❌ **Export করা file অনেক বড়:** "
                         f"`{_readable_size(actual_size)}`",
                         parse_mode=ParseMode.MARKDOWN,
                     )
@@ -919,14 +891,14 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
                 if ok:
                     await status_msg.edit_text(
-                        f"✅ **Done!** `{os.path.basename(local_path)}`\n"
+                        f"✅ **সম্পন্ন!** `{os.path.basename(local_path)}`\n"
                         f"📦 `{_readable_size(actual_size)}` — "
                         f"sent as **{detected}**",
                         parse_mode=ParseMode.MARKDOWN,
                     )
                 else:
                     await status_msg.edit_text(
-                        "❌ **Upload to Telegram failed.** Please try again.",
+                        "❌ **Telegram এ upload ব্যর্থ।** আবার চেষ্টা করুন।",
                         parse_mode=ParseMode.MARKDOWN,
                     )
 
@@ -941,7 +913,7 @@ async def _process_gdl(client: Client, message: Message, url: str):
         LOGGER.error(f"[GDL] Unhandled error: {e}")
         try:
             await status_msg.edit_text(
-                f"❌ **An error occurred:**\n`{str(e)[:300]}`",
+                f"❌ **Error হয়েছে:**\n`{str(e)[:300]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception:
@@ -949,121 +921,287 @@ async def _process_gdl(client: Client, message: Message, url: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMAND + AUTO-DETECT HANDLER SETUP
+# USAGE MESSAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+_USAGE_TEXT = """**📥 Google Drive Downloader**
+━━━━━━━━━━━━━━━━━━
+
+তিনটা পদ্ধতিতে ব্যবহার করা যায়:
+
+**১.** সরাসরি লিংক দিয়ে:
+`/gdl https://drive.google.com/file/d/<ID>/view`
+
+**২.** শুধু command দিলে বট লিংক চাইবে:
+`/gdl` → তারপর লিংক পাঠাও
+
+**৩.** Drive লিংক আছে এমন মেসেজ reply করে:
+[মেসেজ forward করো] → `/gdl` reply করো
+
+**Supported links:**
+• `drive.google.com/file/d/<ID>/view`
+• `drive.google.com/folders/<ID>`
+• `drive.google.com/drive/folders/<ID>`
+• `drive.google.com/open?id=<ID>`
+• `docs.google.com/document/d/<ID>`
+
+**Features:**
+• Max: `2 GB`
+• Google Docs → Office format auto-convert
+• Smart upload: video/audio/photo/animation/doc
+• Folder download সম্পূর্ণ support"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HANDLER SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
 def setup_gdl_handler(app: Client):
+    """
+    সব handler register করে।
 
-    # ─── 1. /gdl <link>  command ─────────────────────────────────────────
+    ⚠️  IMPORTANT: Auto-detect সম্পূর্ণ বন্ধ।
+        শুধুমাত্র /gdl command এর মাধ্যমে কাজ করবে।
+
+    তিনটা পদ্ধতি:
+    ① /gdl <url>          — inline URL
+    ② /gdl               — bot asks for URL, user sends it
+    ③ reply + /gdl        — reply to any message with a Drive link
+    """
+
+    # ════════════════════════════════════════════════════════════════════════
+    # HANDLER ①②③ — /gdl command (সব পদ্ধতি এক handler এ)
+    # ════════════════════════════════════════════════════════════════════════
+
     @app.on_message(
         filters.command("gdl", prefixes=COMMAND_PREFIX)
         & (filters.private | filters.group)
     )
     async def gdl_command(client: Client, message: Message):
         """
-        /gdl <Google Drive link>
+        /gdl command handler।
 
-        Also works if the link is hidden inside a hyperlink
-        or sent as a reply to a message containing a Drive link.
+        তিনটা scenario handle করে:
+        ① /gdl <url>    → সরাসরি process
+        ② reply + /gdl  → reply থেকে URL নাও, process করো
+        ③ /gdl alone    → URL চাও, অপেক্ষা করো
         """
+        user_id = (
+            message.from_user.id if message.from_user
+            else message.chat.id
+        )
+        chat_id = message.chat.id
+
+        # ─── pending থাকলে cancel করো, নতুন করে শুরু করো ───────────────
+        pending_key = (chat_id, user_id)
+        if pending_key in _pending_url_requests:
+            old_status = _pending_url_requests.pop(pending_key)
+            try:
+                await old_status.edit_text(
+                    "🔄 **নতুন /gdl command পেয়েছি। আগেরটা cancel।**",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
+
         url = None
 
-        # A) Try plain-text command argument
+        # ── পদ্ধতি ①: /gdl <url> ────────────────────────────────────────
         if len(message.command) >= 2:
-            candidate = message.command[1].strip()
-            if (
+            candidate = " ".join(message.command[1:]).strip()
+            # URL entity বা raw text থেকে Drive URL বের করো
+            urls_in_command = []
+            for match in _DRIVE_URL_RE.finditer(candidate):
+                urls_in_command.append(_clean_url(match.group(0)))
+            if urls_in_command:
+                url = urls_in_command[0]
+            elif (
                 "drive.google.com" in candidate
                 or "docs.google.com" in candidate
             ):
-                url = candidate
+                url = _clean_url(candidate)
 
-        # B) Try ALL entity types + regex in this message
+        # ── এই message এর entities থেকেও চেষ্টা ─────────────────────────
         if not url:
             found = _extract_all_drive_urls(message)
             if found:
                 url = found[0]
 
-        # C) Try replied-to message — ALL methods
+        # ── পদ্ধতি ③: reply করা মেসেজ থেকে URL ─────────────────────────
         if not url and message.reply_to_message:
             found = _extract_all_drive_urls(message.reply_to_message)
             if found:
                 url = found[0]
+                LOGGER.info(
+                    f"[GDL] URL পাওয়া গেল replied message থেকে: {url}"
+                )
 
-        # D) No URL found → show usage
-        if not url:
-            await message.reply_text(
-                "**📥 Google Drive Downloader**\n"
-                "━━━━━━━━━━━━━━━━━━\n\n"
-                "**Usage:** `/gdl <Google Drive link>`\n\n"
-                "**Supported links:**\n"
-                "• `https://drive.google.com/file/d/<ID>/view`\n"
-                "• `https://drive.google.com/folders/<ID>`\n"
-                "• `https://drive.google.com/drive/folders/<ID>`\n"
-                "• `https://drive.google.com/open?id=<ID>`\n\n"
-                "**Features:**\n"
-                "• Max file size: `2 GB`\n"
-                "• Google Docs → Office format\n"
-                "• Smart upload: video/audio/photo/animation/document\n"
-                "• Reply to a message with a Drive link\n"
-                "• Auto-detects hyperlinks, plain URLs, raw text!\n\n"
-                "**Example:**\n"
-                "`/gdl https://drive.google.com/file/d/1BxiM.../view`",
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
+        # ── URL পাওয়া গেলে সরাসরি process ───────────────────────────────
+        if url:
+            if "drive.google.com" not in url and "docs.google.com" not in url:
+                await message.reply_text(
+                    "❌ **এটি Google Drive লিংক মনে হচ্ছে না।**\n\n"
+                    "দয়া করে একটি valid `drive.google.com` URL দিন।",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            LOGGER.info(
+                f"[GDL] /gdl — user {user_id} — URL: {url}"
             )
+            await _process_gdl(client, message, url)
             return
 
-        if "drive.google.com" not in url and "docs.google.com" not in url:
-            await message.reply_text(
-                "❌ **That doesn't look like a Google Drive link.**\n\n"
-                "Please send a valid `drive.google.com` URL.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
+        # ── পদ্ধতি ②: URL নেই → bot জিজ্ঞেস করবে ────────────────────────
         LOGGER.info(
-            f"[GDL] /gdl from user "
-            f"{getattr(message.from_user, 'id', '?')}: {url}"
+            f"[GDL] /gdl — user {user_id} — URL চাওয়া হচ্ছে"
         )
-        await _process_gdl(client, message, url)
 
-    # ─── 2. Auto-detect Drive links in ANY message ────────────────────────
-    _has_text_or_entities = filters.create(
-        lambda _, __, m: bool(
-            m.text or m.caption
-            or m.entities or m.caption_entities
+        ask_msg = await message.reply_text(
+            "📎 **Google Drive লিংক পাঠাও!**\n\n"
+            f"⏳ তোমার কাছ থেকে লিংকের জন্য "
+            f"`{WAIT_FOR_URL_TIMEOUT}` সেকেন্ড অপেক্ষা করব।\n\n"
+            "❌ Cancel করতে `/cancel` লেখো।",
+            parse_mode=ParseMode.MARKDOWN,
         )
-    )
+
+        # pending এ রেজিস্টার করো
+        _pending_url_requests[pending_key] = ask_msg
+
+        # Timeout এর পরে pending সরিয়ে দাও
+        async def _timeout_cleanup():
+            await asyncio.sleep(WAIT_FOR_URL_TIMEOUT)
+            if pending_key in _pending_url_requests:
+                _pending_url_requests.pop(pending_key)
+                try:
+                    await ask_msg.edit_text(
+                        f"⏰ **Timeout!** `{WAIT_FOR_URL_TIMEOUT}` সেকেন্ডে "
+                        "কোনো লিংক পাওয়া যায়নি।\n\n"
+                        "আবার `/gdl` command দিয়ে চেষ্টা করো।",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception:
+                    pass
+
+        asyncio.create_task(_timeout_cleanup())
+
+    # ════════════════════════════════════════════════════════════════════════
+    # HANDLER — Pending URL receiver
+    # /gdl দেওয়ার পরে bot URL চাইলে user যে message পাঠায় সেটা catch করে
+    # ════════════════════════════════════════════════════════════════════════
 
     @app.on_message(
-        _has_text_or_entities
-        & (filters.private | filters.group)
-        & ~filters.command("gdl", prefixes=COMMAND_PREFIX),
-        group=1,
+        (filters.private | filters.group)
+        & ~filters.command(
+            ["gdl", "cancel", "start", "help"],
+            prefixes=COMMAND_PREFIX,
+        ),
+        group=10,  # low priority — অন্য handlers আগে চলবে
     )
-    async def auto_detect_drive_links(client: Client, message: Message):
+    async def pending_url_receiver(client: Client, message: Message):
         """
-        Automatically detect Google Drive URLs in any message:
-        - Plain Drive URLs (URL entity or raw text)
-        - Hyperlinked Drive URLs (TEXT_LINK entity)   ← Tawhid-style links
-        - Forwarded messages containing Drive URLs
+        /gdl দেওয়ার পরে bot URL চাইলে এই handler সেই URL catch করে।
+
+        ⚠️  শুধুমাত্র pending list এ থাকা user এর message process করবে।
+            অন্য কারো message এ কোনো কাজ করবে না।
         """
-        if message.from_user and message.from_user.is_self:
+        user_id = (
+            message.from_user.id if message.from_user
+            else message.chat.id
+        )
+        chat_id  = message.chat.id
+        key      = (chat_id, user_id)
+
+        # এই user pending নয় → কিছু করো না
+        if key not in _pending_url_requests:
             return
 
+        ask_msg = _pending_url_requests.pop(key)
+
+        # message থেকে Drive URL বের করো
         urls = _extract_all_drive_urls(message)
+
+        # যদি URL না পাওয়া যায়, raw text চেক করো
         if not urls:
+            raw = (message.text or message.caption or "").strip()
+            if "drive.google.com" in raw or "docs.google.com" in raw:
+                cleaned = _clean_url(raw)
+                if cleaned:
+                    urls = [cleaned]
+
+        if not urls:
+            # URL পাওয়া যায়নি → আবার জিজ্ঞেস করো (pending রাখো)
+            _pending_url_requests[key] = ask_msg
+            await message.reply_text(
+                "❌ **এটি Google Drive লিংক মনে হচ্ছে না।**\n\n"
+                "দয়া করে একটি valid Drive URL পাঠাও।\n"
+                "উদাহরণ:\n"
+                "`https://drive.google.com/file/d/<ID>/view`\n\n"
+                "❌ বাতিল করতে `/cancel` লেখো।",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return
 
-        sender = getattr(message.from_user, "id", "?")
+        url = urls[0]
+
         LOGGER.info(
-            f"[GDL] Auto-detected {len(urls)} Drive URL(s) "
-            f"from user {sender}: {urls}"
+            f"[GDL] Pending URL received — user {user_id}: {url}"
         )
 
-        for url in urls:
-            await _process_gdl(client, message, url)
+        # Ask message আপডেট করো
+        try:
+            await ask_msg.edit_text(
+                f"✅ **লিংক পেয়েছি!** Processing শুরু হচ্ছে…\n\n"
+                f"🔗 `{url}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+
+        await _process_gdl(client, message, url)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # HANDLER — /cancel
+    # ════════════════════════════════════════════════════════════════════════
+
+    @app.on_message(
+        filters.command("cancel", prefixes=COMMAND_PREFIX)
+        & (filters.private | filters.group)
+    )
+    async def cancel_pending(client: Client, message: Message):
+        """
+        /gdl এর পরে URL দেওয়া cancel করে।
+        """
+        user_id = (
+            message.from_user.id if message.from_user
+            else message.chat.id
+        )
+        key = (message.chat.id, user_id)
+
+        if key in _pending_url_requests:
+            ask_msg = _pending_url_requests.pop(key)
+            try:
+                await ask_msg.edit_text(
+                    "❌ **Cancel করা হয়েছে।**\n\n"
+                    "আবার শুরু করতে `/gdl` command দাও।",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
+            await message.reply_text(
+                "✅ **GDL request cancel হয়েছে।**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await message.reply_text(
+                "ℹ️ **কোনো active GDL request নেই।**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
     LOGGER.info(
-        "[GDL] /gdl command + universal auto-detect handlers registered."
+        "[GDL] Handler registered — /gdl command only mode active.\n"
+        "       Auto-detect: DISABLED ✗\n"
+        "       Method ①: /gdl <url> ✓\n"
+        "       Method ②: /gdl → bot asks → user sends URL ✓\n"
+        "       Method ③: reply to message + /gdl ✓"
     )
