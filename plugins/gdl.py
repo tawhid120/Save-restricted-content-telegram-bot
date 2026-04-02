@@ -1045,7 +1045,7 @@ You can use it in **3 easy ways:**
 
 **Method 2 — Just send the command:**
 Type `/gdl` and I will ask you for the link.
-_(I'll wait 60 seconds for your input)_
+__(I'll wait 60 seconds for your input)__
 
 **Method 3 — Reply to a message:**
 Forward a message that has a Drive link,
@@ -1063,7 +1063,7 @@ then reply to it with `/gdl`
 • Max: `2 GB`
 • Google Docs → Office format auto-convert
 • Smart upload: video/audio/photo/animation/doc
-• Full folder download _(💎 Premium only)_
+• Full folder download __(💎 Premium only)__
 
 **⚠️ Notes:**
 • 🆓 Free users: 5-minute cooldown between downloads
