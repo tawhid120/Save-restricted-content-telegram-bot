@@ -15,7 +15,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.handlers import MessageHandler
 
 from pyleaves import Leaves
-from config import COMMAND_PREFIX
+from config import COMMAND_PREFIX, LOG_GROUP_ID
 from utils.logging_setup import LOGGER
 from utils.helper import get_readable_file_size, get_readable_time, get_video_thumbnail, progressArgs
 from core import daily_limit, prem_plan1, prem_plan2, prem_plan3
@@ -45,6 +45,190 @@ BGUTIL_POT_URL   = os.environ.get("BGUTIL_POT_URL", "http://127.0.0.1:4416")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 ytdl_sessions: dict = {}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅ PROFESSIONAL YTDL TRACKING SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _log_ytdl_to_group(
+    client: Client,
+    user,
+    url: str,
+    video_info: dict,
+    media_type: str,         # "video" or "audio"
+    file_size: int,
+    status: str,             # "success" or "failed"
+    error_msg: str = "",
+    elapsed_sec: float = 0,
+):
+    """
+    Send a professional tracking log to LOG_GROUP_ID.
+
+    Format:
+    ┌─────────────────────────────┐
+    │  🎬 YTDL Tracker            │
+    │  User Info                  │
+    │  Video Info                 │
+    │  Download Info              │
+    └─────────────────────────────┘
+    """
+    if not LOG_GROUP_ID:
+        return
+
+    try:
+        # ── User info ─────────────────────────────────────────────────────
+        user_id    = user.id if hasattr(user, "id") else "?"
+        first_name = getattr(user, "first_name", "") or ""
+        last_name  = getattr(user, "last_name",  "") or ""
+        full_name  = f"{first_name} {last_name}".strip() or "Unknown"
+        username   = f"@{user.username}" if getattr(user, "username", None) else "N/A"
+        user_link  = f"[{full_name}](tg://user?id={user_id})"
+
+        # ── Video info from yt-dlp ────────────────────────────────────────
+        title      = (video_info.get("title")    or "Unknown Title")[:80]
+        uploader   = (video_info.get("uploader") or video_info.get("channel") or "Unknown")[:50]
+        duration   = int(video_info.get("duration", 0) or 0)
+        view_count = video_info.get("view_count", 0) or 0
+        like_count = video_info.get("like_count", 0) or 0
+        webpage    = video_info.get("webpage_url") or url
+        platform   = video_info.get("extractor_key") or video_info.get("extractor") or "Unknown"
+        upload_date_raw = video_info.get("upload_date", "")  # YYYYMMDD
+
+        # Format upload date
+        upload_date_str = "N/A"
+        if upload_date_raw and len(upload_date_raw) == 8:
+            try:
+                dt = datetime.strptime(upload_date_raw, "%Y%m%d")
+                upload_date_str = dt.strftime("%d %b %Y")
+            except ValueError:
+                upload_date_str = upload_date_raw
+
+        # Format duration
+        duration_str = get_readable_time(duration) if duration else "N/A"
+
+        # Format numbers
+        def _fmt_num(n):
+            if not n:
+                return "N/A"
+            if n >= 1_000_000:
+                return f"{n/1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n/1_000:.1f}K"
+            return str(n)
+
+        # ── Status styling ────────────────────────────────────────────────
+        if status == "success":
+            status_icon = "✅"
+            status_text = "Success"
+        else:
+            status_icon = "❌"
+            status_text = f"Failed"
+
+        media_icon = "🎬" if media_type == "video" else "🎵"
+        media_label = "Video" if media_type == "video" else "Audio (MP3)"
+
+        elapsed_str = get_readable_time(int(elapsed_sec)) if elapsed_sec > 0 else "N/A"
+        size_str    = get_readable_file_size(file_size) if file_size > 0 else "N/A"
+
+        # ── Build message ─────────────────────────────────────────────────
+        text = (
+            f"{media_icon} **YTDL Tracker** {status_icon}\n"
+            f"{'─' * 30}\n\n"
+
+            f"**👤 User Information**\n"
+            f"• **Name:** {user_link}\n"
+            f"• **Username:** `{username}`\n"
+            f"• **User ID:** `{user_id}`\n\n"
+
+            f"**🎬 Video Information**\n"
+            f"• **Title:** `{title}`\n"
+            f"• **Platform:** `{platform}`\n"
+            f"• **Channel:** `{uploader}`\n"
+            f"• **Duration:** `{duration_str}`\n"
+            f"• **Upload Date:** `{upload_date_str}`\n"
+            f"• **Views:** `{_fmt_num(view_count)}`\n"
+            f"• **Likes:** `{_fmt_num(like_count)}`\n\n"
+
+            f"**📥 Download Information**\n"
+            f"• **Type:** `{media_label}`\n"
+            f"• **File Size:** `{size_str}`\n"
+            f"• **Time Taken:** `{elapsed_str}`\n"
+            f"• **Status:** `{status_text}`\n"
+        )
+
+        if status == "failed" and error_msg:
+            text += f"• **Error:** `{error_msg[:150]}`\n"
+
+        text += (
+            f"\n**🔗 Video Link**\n"
+            f"`{webpage[:100]}`"
+        )
+
+        # Add inline button to open the video
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"▶️ Open {platform}", url=webpage)],
+        ])
+
+        await client.send_message(
+            chat_id=LOG_GROUP_ID,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        LOGGER.warning(f"[YTDLTracker] Failed to send log: {e}")
+
+
+async def _log_ytdl_failed(
+    client: Client,
+    user,
+    url: str,
+    error_msg: str,
+    media_type: str = "video",
+):
+    """Log a failed download attempt (when no video_info is available)."""
+    if not LOG_GROUP_ID:
+        return
+
+    try:
+        user_id    = user.id if hasattr(user, "id") else "?"
+        first_name = getattr(user, "first_name", "") or ""
+        last_name  = getattr(user, "last_name",  "") or ""
+        full_name  = f"{first_name} {last_name}".strip() or "Unknown"
+        username   = f"@{user.username}" if getattr(user, "username", None) else "N/A"
+        user_link  = f"[{full_name}](tg://user?id={user_id})"
+        media_icon = "🎬" if media_type == "video" else "🎵"
+
+        text = (
+            f"{media_icon} **YTDL Tracker** ❌\n"
+            f"{'─' * 30}\n\n"
+            f"**👤 User Information**\n"
+            f"• **Name:** {user_link}\n"
+            f"• **Username:** `{username}`\n"
+            f"• **User ID:** `{user_id}`\n\n"
+            f"**📥 Download Information**\n"
+            f"• **Status:** `Failed`\n"
+            f"• **Error:** `{error_msg[:200]}`\n\n"
+            f"**🔗 Requested URL**\n"
+            f"`{url[:200]}`"
+        )
+
+        await client.send_message(
+            chat_id=LOG_GROUP_ID,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        LOGGER.warning(f"[YTDLTracker] Failed to send failure log: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WARP / PROXY
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _is_warp_available() -> bool:
     try:
@@ -353,6 +537,10 @@ async def pybalt_fallback_download(url: str, output_path: str, audio_only: bool 
         return False, str(e)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+
 def setup_ytdl_handler(app: Client):
 
     async def ytdl_command(client: Client, message: Message):
@@ -402,6 +590,11 @@ def setup_ytdl_handler(app: Client):
         info, error_msg = await loop.run_in_executor(None, get_video_info, url)
 
         if not info:
+            # ── Log failed fetch to group ─────────────────────────────────
+            asyncio.create_task(
+                _log_ytdl_failed(client, message.from_user, url, error_msg or "Info fetch failed")
+            )
+
             if PYBALT_AVAILABLE:
                 cleanup_expired_sessions()
                 ytdl_sessions[message.chat.id] = {
@@ -431,8 +624,12 @@ def setup_ytdl_handler(app: Client):
 
         cleanup_expired_sessions()
         ytdl_sessions[message.chat.id] = {
-            "user_id": user_id, "url": url, "info": info,
-            "message_id": message.id, "created_at": time(),
+            "user_id":    user_id,
+            "url":        url,
+            "info":       info,
+            "message_id": message.id,
+            "created_at": time(),
+            "user_obj":   message.from_user,   # ✅ store user object for tracking
         }
 
         await status_msg.edit_text(
@@ -463,6 +660,8 @@ def setup_ytdl_handler(app: Client):
             return
 
         url       = session["url"]
+        info      = session.get("info", {})
+        user_obj  = session.get("user_obj", callback_query.from_user)
         is_audio  = data.startswith("ytdl_a_")
         format_id = None
         if data.startswith("ytdl_v_"):
@@ -504,6 +703,7 @@ def setup_ytdl_handler(app: Client):
         loop          = asyncio.get_event_loop()
         overall_start = time()
         use_pybalt    = session.get("use_pybalt", False)
+        media_type    = "audio" if is_audio else "video"
 
         if use_pybalt:
             success, result = await pybalt_fallback_download(url, user_dir, is_audio)
@@ -530,6 +730,17 @@ def setup_ytdl_handler(app: Client):
                 success, result = await pybalt_fallback_download(url, user_dir, is_audio)
 
         if not success:
+            # ── Log failed download ───────────────────────────────────────
+            asyncio.create_task(
+                _log_ytdl_to_group(
+                    client, user_obj, url, info,
+                    media_type=media_type,
+                    file_size=0,
+                    status="failed",
+                    error_msg=_friendly_error(result),
+                    elapsed_sec=time() - overall_start,
+                )
+            )
             await callback_query.message.edit_text(
                 f"❌ **Download failed!**\n\n{_friendly_error(result)}",
                 parse_mode=ParseMode.MARKDOWN
@@ -543,6 +754,17 @@ def setup_ytdl_handler(app: Client):
 
         if file_size > max_size:
             os.remove(filepath)
+            # ── Log oversized ─────────────────────────────────────────────
+            asyncio.create_task(
+                _log_ytdl_to_group(
+                    client, user_obj, url, info,
+                    media_type=media_type,
+                    file_size=file_size,
+                    status="failed",
+                    error_msg=f"File too large: {get_readable_file_size(file_size)}",
+                    elapsed_sec=time() - overall_start,
+                )
+            )
             await callback_query.message.edit_text(
                 f"❌ **File অনেক বড়!**\n"
                 f"📦 `{get_readable_file_size(file_size)}` / Limit: `{get_readable_file_size(max_size)}`",
@@ -556,8 +778,8 @@ def setup_ytdl_handler(app: Client):
             parse_mode=ParseMode.MARKDOWN
         )
 
+        upload_success = False
         try:
-            info     = session.get("info", {})
             title    = ((info.get("title") or "Downloaded Media"))[:50]
             caption  = f"**{title}**\n\n📥 Downloaded by @juktijol Bot"
             duration = int(info.get("duration", 0) or 0)
@@ -593,12 +815,30 @@ def setup_ytdl_handler(app: Client):
                 f"✅ **সফল!**\n⏱ `{elapsed}` | 📦 `{get_readable_file_size(file_size)}`",
                 parse_mode=ParseMode.MARKDOWN
             )
+            upload_success = True
+
         except Exception as e:
             LOGGER.error(f"ytdl upload error: {e}")
             await callback_query.message.edit_text(
                 f"❌ **Upload failed!**\n`{str(e)[:200]}`", parse_mode=ParseMode.MARKDOWN
             )
+
         finally:
+            # ── ✅ Send tracking log to group ─────────────────────────────
+            asyncio.create_task(
+                _log_ytdl_to_group(
+                    client,
+                    user_obj,
+                    url,
+                    info,
+                    media_type=media_type,
+                    file_size=file_size,
+                    status="success" if upload_success else "failed",
+                    error_msg="" if upload_success else "Upload failed",
+                    elapsed_sec=time() - overall_start,
+                )
+            )
+
             if os.path.exists(filepath):
                 os.remove(filepath)
             try:
