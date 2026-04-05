@@ -54,7 +54,7 @@ from pyrogram.handlers import MessageHandler
 from config import COMMAND_PREFIX, LOG_GROUP_ID
 from utils.logging_setup import LOGGER
 from utils.helper import get_readable_file_size, get_readable_time
-from core import daily_limit, prem_plan1, prem_plan2, prem_plan3  # ✅ FIXED
+from core import daily_limit, prem_plan1, prem_plan2, prem_plan3
 
 # ── Shared helpers from ytdl.py ───────────────────────────────────────────────
 from plugins.ytdl import (
@@ -78,6 +78,7 @@ try:
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
+    import google_auth_oauthlib.flow as _oauthlib_flow
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     GOOGLE_API_AVAILABLE = False
@@ -98,6 +99,12 @@ SCOPES           = [
 ]
 CREDENTIALS_FILE = "yt_credentials.json"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# AZURE FIX: Use OOB redirect URI instead of localhost
+# Azure server-এ localhost accessible নয়, তাই OOB ব্যবহার করতে হবে
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
+
 YT_TITLE_MAX    = 100
 YT_DESC_MAX     = 5000
 YT_TAG_MAX      = 10
@@ -117,7 +124,6 @@ FREE_COOLDOWN    = 300
 PREMIUM_COOLDOWN = 10
 
 # ── MongoDB Collections ───────────────────────────────────────────────────────
-# ✅ FIXED: Use daily_limit.database to get the DB object, then create collections
 yt_tokens_col  = daily_limit.database["yt_user_tokens"]
 yt_uploads_col = daily_limit.database["yt_upload_logs"]
 
@@ -250,22 +256,53 @@ async def _is_youtube_connected(user_id: int) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# OAUTH FLOW
+# OAUTH FLOW — AZURE FIXED VERSION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _create_oauth_flow():
+    """
+    Azure Fix: redirect_uri = OOB (Out-of-Band)
+    localhost এর বদলে OOB ব্যবহার করলে user browser-এই
+    code দেখতে পাবে, connection refused হবে না।
+    """
     if not os.path.exists(CREDENTIALS_FILE):
         LOGGER.error(f"[ytupload] {CREDENTIALS_FILE} not found!")
         return None
     try:
-        return Flow.from_client_secrets_file(
+        # ✅ FIXED: OOB redirect URI — Azure/Server environment-এ কাজ করে
+        flow = Flow.from_client_secrets_file(
             CREDENTIALS_FILE,
             scopes=SCOPES,
-            redirect_uri="http://localhost",
+            redirect_uri=REDIRECT_URI,
         )
+        return flow
     except Exception as e:
         LOGGER.error(f"[ytupload] OAuth flow error: {e}")
         return None
+
+
+def _get_auth_url(flow) -> str:
+    """Auth URL তৈরি করে — OOB mode-এ code সরাসরি browser-এ দেখায়"""
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    return auth_url
+
+
+def _exchange_code_sync(flow, auth_code: str) -> bool:
+    """
+    Azure Fix: OOB flow-এ code exchange করার সঠিক পদ্ধতি।
+    authorization_response এর বদলে সরাসরি code ব্যবহার করতে হয়।
+    """
+    try:
+        # ✅ FIXED: OOB mode-এ শুধু code দিয়ে token fetch করতে হয়
+        flow.fetch_token(code=auth_code)
+        return True
+    except Exception as e:
+        LOGGER.error(f"[ytupload] Code exchange error: {e}")
+        raise e
 
 
 def _fetch_channel_info_sync(creds) -> dict:
@@ -320,8 +357,12 @@ def _upload_file_to_youtube_sync(
     }
 
     try:
-        media   = MediaFileUpload(filepath, mimetype="video/mp4",
-                                  resumable=True, chunksize=YT_CHUNK_SIZE)
+        media   = MediaFileUpload(
+            filepath,
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=YT_CHUNK_SIZE,
+        )
         request = youtube.videos().insert(
             part=",".join(body.keys()), body=body, media_body=media
         )
@@ -614,7 +655,7 @@ def _user_display(user) -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TUTORIAL TEXT
+# TUTORIAL TEXT — AZURE UPDATED
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 HELP_TEXT = """
@@ -629,8 +670,12 @@ Upload videos directly to your own YouTube Channel!
 1️⃣  Send: `/ytconnect`
 2️⃣  Open the Google Login Link in your browser
 3️⃣  Sign in and tap **Allow**
-4️⃣  Copy the **Authorization Code**
-5️⃣  Send: `/ytcode YOUR_CODE_HERE`
+4️⃣  Google will show you a **code on screen** (page-এ সরাসরি দেখাবে)
+5️⃣  সেই code কপি করে পাঠান: `/ytcode YOUR_CODE_HERE`
+
+💡 **Note:** "This site can't be reached" দেখালে ভয় পাবেন না!
+   Browser এর address bar থেকে `code=` এর পরের অংশটি কপি করুন।
+   অথবা Google সরাসরি code দেখাবে — সেটি কপি করুন।
 
 ─────────────────────────────────────
 🌐 **STEP 2A — Upload from any Website URL**
@@ -680,7 +725,7 @@ def setup_ytupload_handler(app: Client):
         )
 
     # ═══════════════════════════════════════════════════════════
-    # /ytconnect
+    # /ytconnect — AZURE FIXED
     # ═══════════════════════════════════════════════════════════
 
     async def ytconnect_command(client: Client, message: Message):
@@ -719,29 +764,30 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-
+        # ✅ AZURE FIXED: OOB redirect URI ব্যবহার করা হচ্ছে
+        auth_url = _get_auth_url(flow)
         oauth_sessions[user_id] = {"flow": flow, "created_at": time()}
 
         await message.reply_text(
             "🔐 **Connect Your YouTube Channel**\n\n"
-            "**Step 1** — Click the link below:\n"
-            f"[👉 Sign in with Google]({auth_url})\n\n"
-            "**Step 2** — Sign in and tap **Allow**\n\n"
-            "**Step 3** — Copy the **Authorization Code** shown\n\n"
-            "**Step 4** — Send it here:\n"
+            "**Step 1** — নিচের লিংকে ক্লিক করুন:\n"
+            f"[👉 Google দিয়ে Sign in করুন]({auth_url})\n\n"
+            "**Step 2** — আপনার YouTube account দিয়ে Sign in করুন\n\n"
+            "**Step 3** — **Allow** বাটনে ক্লিক করুন\n\n"
+            "**Step 4** — Google আপনাকে একটি **Code** দেখাবে\n"
+            "সেই code কপি করে এখানে পাঠান:\n"
             "`/ytcode YOUR_CODE`\n\n"
-            "⏳ _This session expires in 15 minutes._",
+            "⚠️ **Important Note:**\n"
+            "যদি browser বলে `localhost refused to connect` —\n"
+            "চিন্তা করবেন না! Browser এর address bar দেখুন।\n"
+            "URL-এ `?code=` এর পরের অংশটুকু কপি করুন।\n\n"
+            "⏳ _এই session ১৫ মিনিটে expire হবে।_",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
 
     # ═══════════════════════════════════════════════════════════
-    # /ytcode
+    # /ytcode — AZURE FIXED
     # ═══════════════════════════════════════════════════════════
 
     async def ytcode_command(client: Client, message: Message):
@@ -771,9 +817,30 @@ def setup_ytupload_handler(app: Client):
             return
 
         raw_input = message.command[1].strip()
-        # user পুরো URL paste করলেও code extract হবে
-        _cm = re.search(r'[?&]code=([^& ]+)', raw_input)
-        auth_code = _cm.group(1).strip() if _cm else raw_input
+
+        # ✅ AZURE FIXED: User যদি পুরো URL paste করে তাহলে code extract করো
+        # URL format: http://localhost/?code=XXXX&scope=...
+        # অথবা user শুধু code দিতে পারে
+        auth_code = None
+
+        # Method 1: URL থেকে code extract
+        code_match = re.search(r'[?&]code=([^& \n]+)', raw_input)
+        if code_match:
+            auth_code = code_match.group(1).strip()
+            LOGGER.info(f"[ytupload] Code extracted from URL for user {user_id}")
+
+        # Method 2: সরাসরি code (OOB mode-এ Google সরাসরি code দেয়)
+        if not auth_code:
+            # OOB code সাধারণত alphanumeric + হাইফেন
+            auth_code = raw_input.strip()
+
+        if not auth_code:
+            await message.reply_text(
+                "❌ **Invalid code!**\n\nPlease send the code you received from Google.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
         flow       = session["flow"]
         status_msg = await message.reply_text(
             "🔄 **Verifying your code...**",
@@ -782,16 +849,20 @@ def setup_ytupload_handler(app: Client):
 
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: flow.fetch_token(
-                code=auth_code,
-                authorization_response=f"http://localhost/?code={auth_code}",
-            ))
+
+            # ✅ AZURE FIXED: OOB exchange function ব্যবহার করা হচ্ছে
+            await loop.run_in_executor(
+                None,
+                lambda: _exchange_code_sync(flow, auth_code),
+            )
+
             creds = flow.credentials
 
             await status_msg.edit_text(
                 "📺 **Fetching your channel info...**",
                 parse_mode=ParseMode.MARKDOWN,
             )
+
             channel_info = await loop.run_in_executor(
                 None, lambda: _fetch_channel_info_sync(creds)
             )
@@ -816,11 +887,35 @@ def setup_ytupload_handler(app: Client):
 
         except Exception as e:
             LOGGER.error(f"[ytupload] OAuth exchange error for {user_id}: {e}")
+            err_str = str(e)
             oauth_sessions.pop(user_id, None)
+
+            # ব্যবহারকারীকে বোধগম্য error message দেওয়া
+            if "invalid_grant" in err_str:
+                err_hint = (
+                    "❌ **Invalid or Expired Code!**\n\n"
+                    "কারণ:\n"
+                    "• Code মেয়াদ শেষ হয়েছে\n"
+                    "• Code ভুল দেওয়া হয়েছে\n"
+                    "• Code আগেই ব্যবহার করা হয়েছে\n\n"
+                    "👉 নতুন করে /ytconnect দিয়ে শুরু করুন।"
+                )
+            elif "redirect_uri_mismatch" in err_str:
+                err_hint = (
+                    "❌ **Redirect URI Mismatch!**\n\n"
+                    "Admin-কে Google Cloud Console-এ\n"
+                    "`urn:ietf:wg:oauth:2.0:oob` redirect URI\n"
+                    "add করতে বলুন।"
+                )
+            else:
+                err_hint = (
+                    f"❌ **Code Verification Failed!**\n\n"
+                    f"Error: `{err_str[:200]}`\n\n"
+                    f"Please try /ytconnect again."
+                )
+
             await status_msg.edit_text(
-                f"❌ **Code Verification Failed!**\n\n"
-                f"Error: `{str(e)[:200]}`\n\n"
-                f"Please try /ytconnect again.",
+                err_hint,
                 parse_mode=ParseMode.MARKDOWN,
             )
 
