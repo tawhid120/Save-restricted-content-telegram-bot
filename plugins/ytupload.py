@@ -15,7 +15,6 @@ Features:
   • Referer / HLS / CDN protected stream support
   • Professional tracking & logging (matches ytdl.py style)
   • Full in-bot tutorial via /ythelp
-
 Commands:
   /ytconnect              — Connect your YouTube Channel
   /ytcode <code>          — Submit OAuth authorization code
@@ -55,11 +54,7 @@ from pyrogram.handlers import MessageHandler
 from config import COMMAND_PREFIX, LOG_GROUP_ID
 from utils.logging_setup import LOGGER
 from utils.helper import get_readable_file_size, get_readable_time
-# ── এই line টা সরাও ─────────────────────────────────────────────────────────
-# from core import db, prem_plan1, prem_plan2, prem_plan3   ❌ এটা বাদ দাও
-
-# ── এটা দিয়ে replace করো ────────────────────────────────────────────────────
-from core import daily_limit, prem_plan1, prem_plan2, prem_plan3  # ✅
+from core import daily_limit, prem_plan1, prem_plan2, prem_plan3  # ✅ FIXED
 
 # ── Shared helpers from ytdl.py ───────────────────────────────────────────────
 from plugins.ytdl import (
@@ -82,7 +77,7 @@ try:
     from google_auth_oauthlib.flow import Flow
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
+    from googleapiclient.http import MediaFileUpload
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     GOOGLE_API_AVAILABLE = False
@@ -106,9 +101,9 @@ CREDENTIALS_FILE = "yt_credentials.json"
 YT_TITLE_MAX    = 100
 YT_DESC_MAX     = 5000
 YT_TAG_MAX      = 10
-YT_CHUNK_SIZE   = 5 * 1024 * 1024      # 5 MB resumable chunk
+YT_CHUNK_SIZE   = 5 * 1024 * 1024
 
-SESSION_EXPIRY  = 900                   # 15 minutes OAuth session
+SESSION_EXPIRY  = 900
 
 PRIVACY_OPTIONS = ["public", "private", "unlisted"]
 PRIVACY_LABELS  = {
@@ -118,47 +113,28 @@ PRIVACY_LABELS  = {
 }
 PRIVACY_FROM_CB = {"pub": "public", "prv": "private", "unl": "unlisted"}
 
-# ── Rate limiting ─────────────────────────────────────────────────────────────
-FREE_COOLDOWN    = 300   # Free users  : 5 minutes between uploads
-PREMIUM_COOLDOWN = 10    # Premium users: 10 seconds between uploads
+FREE_COOLDOWN    = 300
+PREMIUM_COOLDOWN = 10
 
 # ── MongoDB Collections ───────────────────────────────────────────────────────
-# ── এই দুই line সরাও ─────────────────────────────────────────────────────────
-# yt_tokens_col  = db["yt_user_tokens"]   ❌
-# yt_uploads_col = db["yt_upload_logs"]   ❌
-
-# ── এটা দিয়ে replace করো ────────────────────────────────────────────────────
-# Get the database object from an existing collection, then create new collections
-yt_tokens_col  = daily_limit.database["yt_user_tokens"]    # ✅
-yt_uploads_col = daily_limit.database["yt_upload_logs"]    # ✅
+# ✅ FIXED: Use daily_limit.database to get the DB object, then create collections
+yt_tokens_col  = daily_limit.database["yt_user_tokens"]
+yt_uploads_col = daily_limit.database["yt_upload_logs"]
 
 # ── In-memory session stores ──────────────────────────────────────────────────
-ytup_sessions:        dict = {}   # chat_id  → upload session data
-oauth_sessions:       dict = {}   # user_id  → OAuth flow state
-user_last_upload:     dict = {}   # user_id  → timestamp of last completed upload
-active_uploads_free:  set  = set()  # user_id of free users currently uploading
+ytup_sessions:        dict = {}
+oauth_sessions:       dict = {}
+user_last_upload:     dict = {}
+active_uploads_free:  set  = set()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RATE LIMIT CHECKER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple[bool, str]:
-    """
-    Check if the user is allowed to start a new upload.
-
-    Rules
-    ─────
-    Free users    : only 1 upload at a time + 5-min cooldown.
-    Premium users : unlimited simultaneous + 10-sec cooldown.
-
-    Returns
-    ───────
-    (allowed: bool, reason_message: str)
-    """
+async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple:
     cooldown = PREMIUM_COOLDOWN if is_premium else FREE_COOLDOWN
 
-    # ── Free user: block concurrent uploads ───────────────────────────────
     if not is_premium and user_id in active_uploads_free:
         return False, (
             "⏳ **Upload in Progress!**\n\n"
@@ -167,7 +143,6 @@ async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple[bool
             "⚡ Upgrade to Premium for unlimited simultaneous uploads → /plans"
         )
 
-    # ── Cooldown check ────────────────────────────────────────────────────
     last_time = user_last_upload.get(user_id, 0)
     elapsed   = time() - last_time
 
@@ -180,8 +155,7 @@ async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple[bool
         else:
             return False, (
                 f"⏳ **Cooldown Active!**\n\n"
-                f"Free users must wait **{get_readable_time(FREE_COOLDOWN)}** "
-                f"between uploads.\n"
+                f"Free users must wait **{get_readable_time(FREE_COOLDOWN)}** between uploads.\n"
                 f"**Time remaining:** `{wait_str}`\n\n"
                 f"⚡ Upgrade to Premium for faster uploads → /plans"
             )
@@ -194,7 +168,6 @@ async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple[bool
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _is_premium(user_id: int) -> bool:
-    """Check MongoDB for an active premium plan."""
     now = datetime.utcnow()
     for col in [prem_plan1, prem_plan2, prem_plan3]:
         plan = await col.find_one({"user_id": user_id})
@@ -207,19 +180,7 @@ async def _is_premium(user_id: int) -> bool:
 # MONGODB — TOKEN MANAGER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def _save_user_token(user_id: int, creds: "Credentials", channel_info: dict):
-    """
-    Save (or update) a user's YouTube OAuth token in MongoDB.
-
-    Schema — yt_user_tokens
-    ───────────────────────
-    user_id      : int       Telegram user ID
-    token        : str       JSON-serialized Credentials
-    channel_id   : str       YouTube Channel ID
-    channel_name : str       YouTube Channel title
-    connected_at : datetime  First connection time
-    updated_at   : datetime  Last token refresh time
-    """
+async def _save_user_token(user_id: int, creds, channel_info: dict):
     now = datetime.utcnow()
     await yt_tokens_col.update_one(
         {"user_id": user_id},
@@ -234,15 +195,10 @@ async def _save_user_token(user_id: int, creds: "Credentials", channel_info: dic
         },
         upsert=True,
     )
-    LOGGER.info(f"[ytupload] Token saved for user {user_id} ✅")
+    LOGGER.info(f"[ytupload] Token saved for user {user_id}")
 
 
-async def _load_user_token(user_id: int) -> "Credentials | None":
-    """
-    Load a user's token from MongoDB.
-    Auto-refreshes expired tokens and re-saves them.
-    Returns None if not found or refresh fails.
-    """
+async def _load_user_token(user_id: int):
     if not GOOGLE_API_AVAILABLE:
         return None
 
@@ -266,7 +222,7 @@ async def _load_user_token(user_id: int) -> "Credentials | None":
                     {"user_id": user_id},
                     {"$set": {"token": creds.to_json(), "updated_at": datetime.utcnow()}},
                 )
-                LOGGER.info(f"[ytupload] Token auto-refreshed for user {user_id} ✅")
+                LOGGER.info(f"[ytupload] Token auto-refreshed for user {user_id}")
             except Exception as e:
                 LOGGER.warning(f"[ytupload] Token refresh failed for {user_id}: {e}")
                 return None
@@ -277,13 +233,11 @@ async def _load_user_token(user_id: int) -> "Credentials | None":
 
 
 async def _delete_user_token(user_id: int) -> bool:
-    """Delete a user's token from MongoDB. Returns True if deleted."""
     result = await yt_tokens_col.delete_one({"user_id": user_id})
     return result.deleted_count > 0
 
 
-async def _get_user_channel_info(user_id: int) -> dict | None:
-    """Return channel info dict from MongoDB (no token data)."""
+async def _get_user_channel_info(user_id: int):
     return await yt_tokens_col.find_one(
         {"user_id": user_id},
         {"channel_id": 1, "channel_name": 1, "connected_at": 1, "updated_at": 1},
@@ -291,7 +245,6 @@ async def _get_user_channel_info(user_id: int) -> dict | None:
 
 
 async def _is_youtube_connected(user_id: int) -> bool:
-    """Return True if the user has a valid YouTube token."""
     creds = await _load_user_token(user_id)
     return creds is not None
 
@@ -300,11 +253,7 @@ async def _is_youtube_connected(user_id: int) -> bool:
 # OAUTH FLOW
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _create_oauth_flow() -> "Flow | None":
-    """
-    Create a Google OAuth 2.0 OOB flow from credentials.json.
-    User will copy-paste the authorization code back to the bot.
-    """
+def _create_oauth_flow():
     if not os.path.exists(CREDENTIALS_FILE):
         LOGGER.error(f"[ytupload] {CREDENTIALS_FILE} not found!")
         return None
@@ -319,8 +268,7 @@ def _create_oauth_flow() -> "Flow | None":
         return None
 
 
-def _fetch_channel_info_sync(creds: "Credentials") -> dict:
-    """Synchronously fetch the authenticated user's YouTube channel info."""
+def _fetch_channel_info_sync(creds) -> dict:
     try:
         youtube  = build("youtube", "v3", credentials=creds)
         response = youtube.channels().list(part="snippet,statistics", mine=True).execute()
@@ -343,23 +291,15 @@ def _fetch_channel_info_sync(creds: "Credentials") -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _upload_file_to_youtube_sync(
-    creds:          "Credentials",
-    filepath:       str,
-    title:          str,
-    description:    str  = "",
-    tags:           list = None,
-    privacy_status: str  = "public",
-    category_id:    str  = "22",
+    creds,
+    filepath: str,
+    title: str,
+    description: str = "",
+    tags: list = None,
+    privacy_status: str = "public",
+    category_id: str = "22",
     progress_cb=None,
 ) -> tuple:
-    """
-    Upload a local file to the user's YouTube channel using resumable upload.
-    Must be called inside asyncio.run_in_executor (blocking I/O).
-
-    Returns
-    ───────
-    (success: bool, video_id_or_error_message: str)
-    """
     youtube = build("youtube", "v3", credentials=creds)
 
     title       = (title or "Untitled")[:YT_TITLE_MAX]
@@ -374,15 +314,15 @@ def _upload_file_to_youtube_sync(
             "categoryId":  category_id,
         },
         "status": {
-            "privacyStatus":          privacy_status,
+            "privacyStatus":           privacy_status,
             "selfDeclaredMadeForKids": False,
         },
     }
 
     try:
-        media    = MediaFileUpload(filepath, mimetype="video/mp4",
-                                   resumable=True, chunksize=YT_CHUNK_SIZE)
-        request  = youtube.videos().insert(
+        media   = MediaFileUpload(filepath, mimetype="video/mp4",
+                                  resumable=True, chunksize=YT_CHUNK_SIZE)
+        request = youtube.videos().insert(
             part=",".join(body.keys()), body=body, media_body=media
         )
         response = None
@@ -398,7 +338,7 @@ def _upload_file_to_youtube_sync(
         if not video_id:
             return False, "YouTube response did not contain a video ID."
 
-        LOGGER.info(f"[ytupload] Upload success → https://youtu.be/{video_id} ✅")
+        LOGGER.info(f"[ytupload] Upload success → https://youtu.be/{video_id}")
         return True, video_id
 
     except Exception as e:
@@ -418,26 +358,14 @@ def _upload_file_to_youtube_sync(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _parse_upload_flags(raw: str) -> dict:
-    """
-    Parse command flags from raw input string.
-
-    Supported flags:
-        --private | --unlisted | --public (default)
-        --title "Custom Title"
-        referer:<url>
-
-    Returns dict with keys: url, referer, privacy, custom_title
-    """
     raw = raw.strip()
 
-    # Privacy flags
     privacy = "public"
     for flag, val in [("--private", "private"), ("--unlisted", "unlisted"), ("--public", "public")]:
         if flag in raw:
             privacy = val
             raw     = raw.replace(flag, "").strip()
 
-    # Custom title --title "..."
     custom_title = None
     for pattern in [r'--title\s+"([^"]+)"', r"--title\s+'([^']+)'"]:
         m = re.search(pattern, raw, re.IGNORECASE)
@@ -446,14 +374,12 @@ def _parse_upload_flags(raw: str) -> dict:
             raw          = (raw[:m.start()] + raw[m.end():]).strip()
             break
 
-    # URL + Referer (uses ytdl.py parser)
     url, referer = parse_url_and_referer(raw) if raw else (None, None)
 
     return {"url": url, "referer": referer, "privacy": privacy, "custom_title": custom_title}
 
 
 def _parse_ytsend_flags(raw: str) -> dict:
-    """Parse /ytsend flags (no URL expected — only privacy & title)."""
     parsed = _parse_upload_flags(raw)
     return {"privacy": parsed["privacy"], "custom_title": parsed["custom_title"]}
 
@@ -463,43 +389,21 @@ def _parse_ytsend_flags(raw: str) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _save_upload_log(
-    user_id:      int,
-    user_name:    str,
-    source_type:  str,    # "url" | "telegram"
-    source_url:   str,
-    yt_video_id:  str,
-    yt_title:     str,
-    privacy:      str,
-    file_size:    int,
-    status:       str,    # "success" | "failed"
-    error_msg:    str   = "",
-    channel_id:   str   = "",
-    channel_name: str   = "",
-    elapsed_sec:  float = 0,
-    is_premium:   bool  = False,
+    user_id: int,
+    user_name: str,
+    source_type: str,
+    source_url: str,
+    yt_video_id: str,
+    yt_title: str,
+    privacy: str,
+    file_size: int,
+    status: str,
+    error_msg: str = "",
+    channel_id: str = "",
+    channel_name: str = "",
+    elapsed_sec: float = 0,
+    is_premium: bool = False,
 ):
-    """
-    Save upload tracking data to MongoDB (yt_upload_logs).
-
-    Schema — yt_upload_logs
-    ───────────────────────
-    user_id       : int
-    user_name     : str
-    source_type   : "url" | "telegram"
-    source_url    : str   (URL or Telegram file_id)
-    yt_video_id   : str
-    yt_url        : str
-    yt_title      : str
-    channel_id    : str
-    channel_name  : str
-    privacy       : str
-    file_size     : int   (bytes)
-    status        : "success" | "failed"
-    error_msg     : str
-    elapsed_sec   : float
-    is_premium    : bool
-    uploaded_at   : datetime
-    """
     try:
         await yt_uploads_col.insert_one({
             "user_id":      user_id,
@@ -530,22 +434,18 @@ async def _save_upload_log(
 async def _log_to_group(
     client,
     user,
-    source_type:  str,
-    source_url:   str,
-    video_title:  str,
-    yt_video_id:  str,
+    source_type: str,
+    source_url: str,
+    video_title: str,
+    yt_video_id: str,
     channel_name: str,
-    privacy:      str,
-    file_size:    int,
-    status:       str,
-    elapsed_sec:  float = 0,
-    error_msg:    str   = "",
-    is_premium:   bool  = False,
+    privacy: str,
+    file_size: int,
+    status: str,
+    elapsed_sec: float = 0,
+    error_msg: str = "",
+    is_premium: bool = False,
 ):
-    """
-    Send a structured upload tracking log to LOG_GROUP_ID.
-    Matches the professional style used in ytdl.py tracking.
-    """
     if not LOG_GROUP_ID:
         return
     try:
@@ -610,20 +510,19 @@ async def _log_failed_attempt(
     client,
     user,
     source_type: str,
-    source_url:  str,
-    error_msg:   str,
-    is_premium:  bool = False,
+    source_url: str,
+    error_msg: str,
+    is_premium: bool = False,
 ):
-    """Send a minimal failure log when upload cannot even start."""
     if not LOG_GROUP_ID:
         return
     try:
-        user_id   = getattr(user, "id", "?")
-        fname     = getattr(user, "first_name", "") or ""
-        lname     = getattr(user, "last_name",  "") or ""
-        full_name = f"{fname} {lname}".strip() or "Unknown"
-        username  = f"@{user.username}" if getattr(user, "username", None) else "N/A"
-        user_link = f"[{full_name}](tg://user?id={user_id})"
+        user_id    = getattr(user, "id", "?")
+        fname      = getattr(user, "first_name", "") or ""
+        lname      = getattr(user, "last_name",  "") or ""
+        full_name  = f"{fname} {lname}".strip() or "Unknown"
+        username   = f"@{user.username}" if getattr(user, "username", None) else "N/A"
+        user_link  = f"[{full_name}](tg://user?id={user_id})"
         plan_badge = "⭐ Premium" if is_premium else "🆓 Free"
         src_icon   = "📨 Telegram" if source_type == "telegram" else "🌐 URL"
 
@@ -656,7 +555,6 @@ async def _log_failed_attempt(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _yt_upload_progress_updater(msg, progress_data: dict):
-    """Update the Telegram message with YouTube upload progress every 4 seconds."""
     last_text = ""
     while not progress_data.get("done"):
         await asyncio.sleep(4)
@@ -685,7 +583,6 @@ async def _yt_upload_progress_updater(msg, progress_data: dict):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _privacy_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    """Build the privacy selection inline keyboard."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🌐 Public",   callback_data=f"ytup_pub_{chat_id}"),
@@ -701,7 +598,6 @@ def _privacy_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _cleanup_dir(dirpath: str):
-    """Remove directory if empty."""
     try:
         if os.path.isdir(dirpath) and not os.listdir(dirpath):
             os.rmdir(dirpath)
@@ -710,7 +606,6 @@ def _cleanup_dir(dirpath: str):
 
 
 def _user_display(user) -> str:
-    """Return a readable display name for the user."""
     fname = getattr(user, "first_name", "") or ""
     lname = getattr(user, "last_name",  "") or ""
     name  = f"{fname} {lname}".strip() or "Unknown"
@@ -726,121 +621,39 @@ HELP_TEXT = """
 📺 **YouTube Upload — Complete Guide**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Upload videos directly to your own YouTube Channel
-straight from this bot — no extra apps needed!
+Upload videos directly to your own YouTube Channel!
 
 ─────────────────────────────────────
 🔐 **STEP 1 — Connect Your YouTube Channel**
-_(Do this only once)_
 
-1️⃣  Send the command:
-    `/ytconnect`
-
-2️⃣  The bot will send you a **Google Login Link**.
-    Tap the link and open it in your browser.
-
-3️⃣  Sign in with your Google account and tap
-    **Allow** to give YouTube permission.
-
-4️⃣  Google will show you an **Authorization Code**.
-    Copy that code.
-
-5️⃣  Send it to the bot like this:
-    `/ytcode YOUR_CODE_HERE`
-
-    Example:
-    `/ytcode 4/0AX4XfWjxxxxxxxxxxxxxxxxxx`
-
-✅  Done! The bot will confirm your channel name.
+1️⃣  Send: `/ytconnect`
+2️⃣  Open the Google Login Link in your browser
+3️⃣  Sign in and tap **Allow**
+4️⃣  Copy the **Authorization Code**
+5️⃣  Send: `/ytcode YOUR_CODE_HERE`
 
 ─────────────────────────────────────
 🌐 **STEP 2A — Upload from any Website URL**
 
-Download a video from any website and upload it
-directly to your YouTube channel.
-
-**Basic:**
 `/ytupload VIDEO_URL`
-
-**With Privacy:**
 `/ytupload VIDEO_URL --private`
 `/ytupload VIDEO_URL --unlisted`
-`/ytupload VIDEO_URL --public`
-
-**With Custom Title:**
-`/ytupload VIDEO_URL --title "My Video Title"`
-
-**All together:**
-`/ytupload VIDEO_URL --title "My Title" --private`
-
-**Supported sites:**
-YouTube, Facebook, Instagram, TikTok,
-Twitter/X, Vimeo, Dailymotion + 1000 more!
+`/ytupload VIDEO_URL --title "My Title"`
+`/ytupload VIDEO_URL referer:https://the-website.com`
 
 ─────────────────────────────────────
 📨 **STEP 2B — Upload a Telegram Video**
 
-Send any video in your Telegram channel or chat
-directly to your YouTube channel.
-
-1️⃣  **Reply** to the video you want to upload.
-2️⃣  Send the command: `/ytsend`
-
-**With Privacy:**
+Reply to the video and send: `/ytsend`
 `/ytsend --private`
-`/ytsend --unlisted`
-
-**With Custom Title:**
-`/ytsend --title "My Video Title"`
-
-**All together:**
-`/ytsend --title "My Title" --unlisted`
-
-─────────────────────────────────────
-🔒 **Privacy Options Explained**
-
-🌐 `Public`   — Everyone can find & watch your video.
-🔒 `Private`  — Only you can see it.
-🔗 `Unlisted` — Anyone with the link can watch,
-                but it won't appear in search results.
-
-─────────────────────────────────────
-⚡ **Free vs Premium Limits**
-
-| Feature              | Free 🆓  | Premium ⭐ |
-|----------------------|----------|------------|
-| Upload               | ✅ Yes   | ✅ Yes     |
-| Cooldown             | 5 min    | 10 sec     |
-| Simultaneous uploads | 1 only   | Unlimited  |
-
-Upgrade to Premium: /plans
+`/ytsend --title "My Title"`
 
 ─────────────────────────────────────
 📋 **Other Commands**
 
-`/ytme`          — View your connected channel info
+`/ytme`          — View connected channel info
 `/ytdisconnect`  — Disconnect your YouTube channel
 `/ythelp`        — Show this guide again
-
-─────────────────────────────────────
-❓ **Troubleshooting**
-
-❌ _"YouTube not connected"_
-→ Use `/ytconnect` to link your channel.
-
-❌ _"Token invalid / expired"_
-→ Use `/ytdisconnect` then `/ytconnect` again.
-
-❌ _"403 Forbidden" error on a URL_
-→ The site is protected. Add a referer like this:
-`/ytupload URL referer:https://the-website.com`
-
-Example:
-`/ytupload https://cdn.example.com/video.m3u8 referer:https://example.com`
-
-❌ _"Cooldown active" (Free users)_
-→ Wait 5 minutes between uploads,
-  or upgrade to Premium: /plans
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """.strip()
@@ -851,17 +664,12 @@ Example:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def setup_ytupload_handler(app: Client):
-    """
-    Register all YouTube upload handlers into the Pyrogram app.
-    Call once at bot startup.
-    """
 
-    # ═════════════════════════════════════════════════════════════════════
-    # /ythelp — Full Tutorial
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # /ythelp
+    # ═══════════════════════════════════════════════════════════
 
     async def ythelp_command(client: Client, message: Message):
-        """Send the complete YouTube upload tutorial."""
         await message.reply_text(
             HELP_TEXT,
             parse_mode=ParseMode.MARKDOWN,
@@ -871,21 +679,16 @@ def setup_ytupload_handler(app: Client):
             ]),
         )
 
-    # ═════════════════════════════════════════════════════════════════════
-    # /ytconnect — Start OAuth Flow
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # /ytconnect
+    # ═══════════════════════════════════════════════════════════
 
     async def ytconnect_command(client: Client, message: Message):
-        """
-        Start the YouTube OAuth flow for the user.
-        Sends an authorization URL; user pastes the code via /ytcode.
-        """
         user_id = message.from_user.id
 
         if not GOOGLE_API_AVAILABLE:
             await message.reply_text(
-                "❌ **Google API library is not installed!**\n\n"
-                "Please contact the bot admin.",
+                "❌ **Google API library is not installed!**\n\nPlease contact the bot admin.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -893,13 +696,11 @@ def setup_ytupload_handler(app: Client):
         if not os.path.exists(CREDENTIALS_FILE):
             await message.reply_text(
                 "❌ **Bot is not configured yet!**\n\n"
-                "Admin needs to set up `yt_credentials.json`.\n"
-                "Use /ythelp to learn more.",
+                "Admin needs to set up `yt_credentials.json`.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # Already connected?
         existing = await _get_user_channel_info(user_id)
         if existing and existing.get("channel_name"):
             await message.reply_text(
@@ -910,7 +711,6 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        # Create OAuth flow
         flow = _create_oauth_flow()
         if not flow:
             await message.reply_text(
@@ -935,24 +735,21 @@ def setup_ytupload_handler(app: Client):
             "**Step 3** — Copy the **Authorization Code** shown\n\n"
             "**Step 4** — Send it here:\n"
             "`/ytcode YOUR_CODE`\n\n"
-            "⏳ _This session expires in 15 minutes._\n\n"
-            "Need help? Use /ythelp",
+            "⏳ _This session expires in 15 minutes._",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
 
-    # ═════════════════════════════════════════════════════════════════════
-    # /ytcode — Submit OAuth Code
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # /ytcode
+    # ═══════════════════════════════════════════════════════════
 
     async def ytcode_command(client: Client, message: Message):
-        """Receive the OAuth authorization code and exchange it for a token."""
         user_id = message.from_user.id
 
         if len(message.command) < 2:
             await message.reply_text(
-                "**Usage:** `/ytcode YOUR_CODE`\n\n"
-                "First start the process with /ytconnect.",
+                "**Usage:** `/ytcode YOUR_CODE`\n\nFirst start with /ytconnect.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -960,8 +757,7 @@ def setup_ytupload_handler(app: Client):
         session = oauth_sessions.get(user_id)
         if not session:
             await message.reply_text(
-                "❌ **No active session found.**\n\n"
-                "Please start again with /ytconnect.",
+                "❌ **No active session found.**\n\nPlease start again with /ytconnect.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -983,14 +779,13 @@ def setup_ytupload_handler(app: Client):
 
         try:
             loop = asyncio.get_event_loop()
-
-            # Token exchange (blocking)
             await loop.run_in_executor(None, lambda: flow.fetch_token(code=auth_code))
             creds = flow.credentials
 
-            # Fetch channel info (blocking)
-            await status_msg.edit_text("📺 **Fetching your channel info...**",
-                                       parse_mode=ParseMode.MARKDOWN)
+            await status_msg.edit_text(
+                "📺 **Fetching your channel info...**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             channel_info = await loop.run_in_executor(
                 None, lambda: _fetch_channel_info_sync(creds)
             )
@@ -1008,8 +803,7 @@ def setup_ytupload_handler(app: Client):
                 f"{('🔗 ' + ch_url) if ch_url else ''}\n\n"
                 f"You can now use:\n"
                 f"• `/ytupload <url>` — Upload from any website\n"
-                f"• Reply to a video + `/ytsend` — Upload from Telegram\n\n"
-                f"Use /ythelp for the full guide.",
+                f"• Reply to a video + `/ytsend` — Upload from Telegram",
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
@@ -1024,12 +818,11 @@ def setup_ytupload_handler(app: Client):
                 parse_mode=ParseMode.MARKDOWN,
             )
 
-    # ═════════════════════════════════════════════════════════════════════
-    # /ytdisconnect — Remove Token
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # /ytdisconnect
+    # ═══════════════════════════════════════════════════════════
 
     async def ytdisconnect_command(client: Client, message: Message):
-        """Remove the user's YouTube token from MongoDB."""
         user_id = message.from_user.id
         deleted = await _delete_user_token(user_id)
 
@@ -1047,12 +840,11 @@ def setup_ytupload_handler(app: Client):
                 parse_mode=ParseMode.MARKDOWN,
             )
 
-    # ═════════════════════════════════════════════════════════════════════
-    # /ytme — Channel Info
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # /ytme
+    # ═══════════════════════════════════════════════════════════
 
     async def ytme_command(client: Client, message: Message):
-        """Show the user's connected channel info and upload stats."""
         user_id    = message.from_user.id
         info       = await _get_user_channel_info(user_id)
         is_premium = await _is_premium(user_id)
@@ -1060,8 +852,7 @@ def setup_ytupload_handler(app: Client):
         if not info or not info.get("channel_name"):
             await message.reply_text(
                 "❌ **No YouTube channel connected.**\n\n"
-                "Use /ytconnect to link your channel.\n"
-                "Need help? /ythelp",
+                "Use /ytconnect to link your channel.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1073,13 +864,11 @@ def setup_ytupload_handler(app: Client):
         ch_url     = f"https://youtube.com/channel/{ch_id}" if ch_id else "N/A"
         conn_at    = info.get("connected_at")
         conn_str   = conn_at.strftime("%d %b %Y, %H:%M UTC") if conn_at else "N/A"
-        upd_at     = info.get("updated_at")
-        upd_str    = upd_at.strftime("%d %b %Y, %H:%M UTC") if upd_at else "N/A"
 
         total_ok   = await yt_uploads_col.count_documents({"user_id": user_id, "status": "success"})
         total_fail = await yt_uploads_col.count_documents({"user_id": user_id, "status": "failed"})
 
-        plan_text  = "⭐ Premium" if is_premium else "🆓 Free (5-min cooldown)"
+        plan_text  = "⭐ Premium" if is_premium else "🆓 Free"
         cooldown   = f"{PREMIUM_COOLDOWN} seconds" if is_premium else f"{FREE_COOLDOWN // 60} minutes"
 
         await message.reply_text(
@@ -1088,36 +877,25 @@ def setup_ytupload_handler(app: Client):
             f"**Channel:** `{ch_name}`\n"
             f"**Channel ID:** `{ch_id}`\n"
             f"**URL:** {ch_url}\n\n"
-            f"**🔑 Token Status:** {'✅ Valid' if token_ok else '❌ Invalid — please /ytdisconnect then /ytconnect'}\n"
-            f"**📅 Connected:** `{conn_str}`\n"
-            f"**🔄 Last Updated:** `{upd_str}`\n\n"
+            f"**🔑 Token Status:** {'✅ Valid' if token_ok else '❌ Invalid — please reconnect'}\n"
+            f"**📅 Connected:** `{conn_str}`\n\n"
             f"**📊 Your Upload Stats**\n"
             f"• ✅ Successful: `{total_ok}`\n"
             f"• ❌ Failed: `{total_fail}`\n\n"
             f"**⚡ Your Plan:** `{plan_text}`\n"
-            f"**⏳ Cooldown:** `{cooldown}`\n\n"
-            f"Commands:\n"
-            f"• `/ytupload <url>` — Upload from URL\n"
-            f"• Reply + `/ytsend` — Upload Telegram video\n"
-            f"• /ytdisconnect — Remove connection\n"
-            f"• /ythelp — Full guide",
+            f"**⏳ Cooldown:** `{cooldown}`",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # /ytupload — URL → YouTube
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     async def ytupload_command(client: Client, message: Message):
-        """
-        Download a video from any website using yt-dlp and upload it
-        to the user's own YouTube channel.
-        """
         user_id    = message.from_user.id
         is_premium = await _is_premium(user_id)
 
-        # Dependencies check
         if not GOOGLE_API_AVAILABLE:
             await message.reply_text(
                 "❌ **Google API library is not installed!**\n"
@@ -1126,12 +904,11 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        # Show help if no URL given
         if len(message.command) < 2:
             await message.reply_text(
                 "📤 **YouTube Direct Uploader**\n\n"
                 "Upload any video from the web to your own YouTube channel!\n\n"
-                "**Quick Usage:**\n"
+                "**Usage:**\n"
                 "`/ytupload VIDEO_URL`\n"
                 "`/ytupload VIDEO_URL --private`\n"
                 "`/ytupload VIDEO_URL --unlisted`\n"
@@ -1142,31 +919,27 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        # YouTube connection check
         if not await _is_youtube_connected(user_id):
             await message.reply_text(
                 "❌ **YouTube channel not connected!**\n\n"
                 "Please connect your channel first:\n"
-                "/ytconnect\n\n"
-                "Need help? /ythelp",
+                "/ytconnect",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # Rate limit check
         allowed, rate_msg = await _check_upload_rate_limit(user_id, is_premium)
         if not allowed:
             await message.reply_text(rate_msg, parse_mode=ParseMode.MARKDOWN)
             return
 
-        # Parse input
         text_parts = message.text.split(None, 1)
         raw        = text_parts[1].strip() if len(text_parts) > 1 else ""
         parsed     = _parse_upload_flags(raw)
 
-        url, referer      = parsed["url"], parsed["referer"]
-        privacy           = parsed["privacy"]
-        custom_title      = parsed["custom_title"]
+        url, referer = parsed["url"], parsed["referer"]
+        privacy      = parsed["privacy"]
+        custom_title = parsed["custom_title"]
 
         if not url:
             await message.reply_text(
@@ -1176,13 +949,12 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        # HLS / CDN warnings
         if is_hls_url(url) and not referer:
             await message.reply_text(
                 "⚠️ **HLS Stream (m3u8) Detected!**\n\n"
                 "This type of URL may require a Referer header.\n"
                 "If you get a 403 error, try:\n"
-                f"`/ytupload {url} referer:https://the-website.com`\n\n"
+                "`/ytupload URL referer:https://the-website.com`\n\n"
                 "⏳ _Trying without referer first..._",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -1190,12 +962,11 @@ def setup_ytupload_handler(app: Client):
             await message.reply_text(
                 "⚠️ **Protected CDN Detected!**\n\n"
                 "If this fails, try adding a referer:\n"
-                f"`/ytupload {url} referer:https://the-website.com`\n\n"
+                "`/ytupload URL referer:https://the-website.com`\n\n"
                 "⏳ _Trying now..._",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
-        # Fetch video info
         warp_ok    = _is_warp_available()
         status_msg = await message.reply_text(
             f"🔍 **Analyzing URL...**\n"
@@ -1221,8 +992,7 @@ def setup_ytupload_handler(app: Client):
                 await status_msg.edit_text(
                     "❌ **403 Forbidden — Access Denied!**\n\n"
                     "This video requires a Referer. Try:\n"
-                    f"`/ytupload {url} referer:https://the-website.com`\n\n"
-                    "Use /ythelp for more info.",
+                    "`/ytupload URL referer:https://the-website.com`",
                     parse_mode=ParseMode.MARKDOWN,
                 )
             else:
@@ -1233,7 +1003,6 @@ def setup_ytupload_handler(app: Client):
                 )
             return
 
-        # Build session
         title    = (custom_title or info.get("title") or "Untitled")[:YT_TITLE_MAX]
         duration = int(info.get("duration", 0) or 0)
         uploader = (info.get("uploader") or info.get("channel") or "Unknown")[:50]
@@ -1261,17 +1030,22 @@ def setup_ytupload_handler(app: Client):
                 f"👤 **Channel/Uploader:** {uploader}\n"
                 f"⏱ **Duration:** {dur_str}\n"
                 f"🔒 **Privacy:** {PRIVACY_LABELS[privacy]}"
-                f"{chr(10) + '🔗 Referer Active' if referer else ''}"
                 f"{plan_note}\n\n"
                 f"**Confirm upload?**",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"✅ Upload ({PRIVACY_LABELS[privacy]})",
-                        callback_data=f"ytup_confirm_{message.chat.id}",
-                    )],
-                    [InlineKeyboardButton("❌ Cancel",
-                                         callback_data=f"ytup_cancel_{message.chat.id}")],
+                    [
+                        InlineKeyboardButton(
+                            f"✅ Upload ({PRIVACY_LABELS[privacy]})",
+                            callback_data=f"ytup_confirm_{message.chat.id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel",
+                            callback_data=f"ytup_cancel_{message.chat.id}",
+                        )
+                    ],
                 ]),
                 disable_web_page_preview=True,
             )
@@ -1280,7 +1054,6 @@ def setup_ytupload_handler(app: Client):
                 f"📹 **{title[:60]}**\n\n"
                 f"👤 **Channel/Uploader:** {uploader}\n"
                 f"⏱ **Duration:** {dur_str}"
-                f"{chr(10) + '🔗 Referer Active' if referer else ''}"
                 f"{plan_note}\n\n"
                 f"**Choose privacy for your YouTube upload:**",
                 parse_mode=ParseMode.MARKDOWN,
@@ -1288,55 +1061,38 @@ def setup_ytupload_handler(app: Client):
                 disable_web_page_preview=True,
             )
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # /ytsend — Telegram Video → YouTube
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     async def ytsend_command(client: Client, message: Message):
-        """
-        Reply to any Telegram video and run this command
-        to upload it directly to the user's YouTube channel.
-        """
         user_id    = message.from_user.id
         is_premium = await _is_premium(user_id)
 
         if not GOOGLE_API_AVAILABLE:
             await message.reply_text(
-                "❌ **Google API library not installed!**\n"
-                "Contact the bot admin.",
+                "❌ **Google API library not installed!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # YouTube connection check
         if not await _is_youtube_connected(user_id):
             await message.reply_text(
-                "❌ **YouTube channel not connected!**\n\n"
-                "Use /ytconnect to link your channel.\n"
-                "Need help? /ythelp",
+                "❌ **YouTube channel not connected!**\n\nUse /ytconnect to link your channel.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # Rate limit check
         allowed, rate_msg = await _check_upload_rate_limit(user_id, is_premium)
         if not allowed:
             await message.reply_text(rate_msg, parse_mode=ParseMode.MARKDOWN)
             return
 
-        # Reply check
         replied = message.reply_to_message
         if not replied:
             await message.reply_text(
                 "❌ **Please reply to a video!**\n\n"
-                "How to use:\n"
-                "1️⃣  Find the video you want to upload\n"
-                "2️⃣  Reply to it and send: `/ytsend`\n\n"
-                "Options:\n"
-                "`/ytsend --private`\n"
-                "`/ytsend --unlisted`\n"
-                "`/ytsend --title \"My Title\"`\n\n"
-                "Need help? /ythelp",
+                "Reply to any video and send `/ytsend`",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1344,24 +1100,19 @@ def setup_ytupload_handler(app: Client):
         media = replied.video or replied.document or replied.animation
         if not media:
             await message.reply_text(
-                "❌ **The replied message has no video!**\n\n"
-                "Please reply to a Video, Video File, or GIF.\n"
-                "Need help? /ythelp",
+                "❌ **The replied message has no video!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # Parse flags
         text_parts   = message.text.split(None, 1)
         raw          = text_parts[1].strip() if len(text_parts) > 1 else ""
         parsed       = _parse_ytsend_flags(raw)
         privacy      = parsed["privacy"]
         custom_title = parsed["custom_title"]
 
-        # File info
         file_size  = getattr(media, "file_size", 0) or 0
         file_name  = getattr(media, "file_name", None) or ""
-        mime_type  = getattr(media, "mime_type", "video/mp4") or "video/mp4"
         duration   = getattr(media, "duration", 0) or 0
         file_id    = media.file_id
 
@@ -1375,8 +1126,7 @@ def setup_ytupload_handler(app: Client):
         if file_size > MAX_FILE_SIZE:
             await message.reply_text(
                 f"❌ **File too large!**\n"
-                f"📦 `{get_readable_file_size(file_size)}` exceeds the "
-                f"`{get_readable_file_size(MAX_FILE_SIZE)}` limit.",
+                f"📦 `{get_readable_file_size(file_size)}` exceeds the limit.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1386,7 +1136,6 @@ def setup_ytupload_handler(app: Client):
             "user_id":      user_id,
             "file_id":      file_id,
             "file_size":    file_size,
-            "mime_type":    mime_type,
             "duration":     duration,
             "file_name":    file_name,
             "privacy":      privacy,
@@ -1397,8 +1146,8 @@ def setup_ytupload_handler(app: Client):
             "is_premium":   is_premium,
         }
 
-        dur_str  = get_readable_time(duration) if duration else "Unknown"
-        size_str = get_readable_file_size(file_size) if file_size else "Unknown"
+        dur_str   = get_readable_time(duration) if duration else "Unknown"
+        size_str  = get_readable_file_size(file_size) if file_size else "Unknown"
         plan_note = "" if is_premium else "\n_🆓 Free user — 1 upload at a time_"
 
         if privacy != "public":
@@ -1412,12 +1161,18 @@ def setup_ytupload_handler(app: Client):
                 f"**Confirm upload?**",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"✅ Upload ({PRIVACY_LABELS[privacy]})",
-                        callback_data=f"ytup_confirm_{message.chat.id}",
-                    )],
-                    [InlineKeyboardButton("❌ Cancel",
-                                         callback_data=f"ytup_cancel_{message.chat.id}")],
+                    [
+                        InlineKeyboardButton(
+                            f"✅ Upload ({PRIVACY_LABELS[privacy]})",
+                            callback_data=f"ytup_confirm_{message.chat.id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel",
+                            callback_data=f"ytup_cancel_{message.chat.id}",
+                        )
+                    ],
                 ]),
             )
         else:
@@ -1432,12 +1187,11 @@ def setup_ytupload_handler(app: Client):
                 reply_markup=_privacy_keyboard(message.chat.id),
             )
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # CORE — URL Upload Execution
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     async def _execute_url_upload(client, cq: CallbackQuery, session: dict, privacy: str):
-        """Download via yt-dlp then upload to user's YouTube channel."""
         chat_id    = cq.message.chat.id
         user_id    = session["user_id"]
         url        = session["url"]
@@ -1450,7 +1204,6 @@ def setup_ytupload_handler(app: Client):
         description = (info.get("description") or "")[:YT_DESC_MAX]
         tags        = (info.get("tags") or [])[:YT_TAG_MAX]
 
-        # Mark free user as active
         if not is_premium:
             active_uploads_free.add(user_id)
 
@@ -1475,7 +1228,6 @@ def setup_ytupload_handler(app: Client):
         user_dir      = os.path.join(DOWNLOAD_DIR, f"ytup_{user_id}")
         os.makedirs(user_dir, exist_ok=True)
 
-        # ── Step 1: Download ──────────────────────────────────────────────
         await cq.message.edit_text(
             f"📥 **Downloading...**\n"
             f"_{'🟢 WARP' if warp_ok else '🟡 Direct'}"
@@ -1543,7 +1295,6 @@ def setup_ytupload_handler(app: Client):
                 active_uploads_free.discard(user_id)
             return
 
-        # ── Step 2: YouTube Upload ─────────────────────────────────────────
         yt_progress = {"uploaded": 0, "total": file_size, "done": False}
 
         def _prog_cb(uploaded, total):
@@ -1578,7 +1329,6 @@ def setup_ytupload_handler(app: Client):
             except Exception:
                 pass
 
-        # Cleanup
         try:
             os.remove(filepath)
         except Exception:
@@ -1634,12 +1384,11 @@ def setup_ytupload_handler(app: Client):
                 yt_result, ch_id, ch_name, elapsed, is_premium,
             ))
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # CORE — Telegram Upload Execution
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     async def _execute_telegram_upload(client, cq: CallbackQuery, session: dict, privacy: str):
-        """Download Telegram video then upload to user's YouTube channel."""
         chat_id    = cq.message.chat.id
         user_id    = session["user_id"]
         file_id    = session["file_id"]
@@ -1649,7 +1398,6 @@ def setup_ytupload_handler(app: Client):
         user_obj   = session.get("user_obj", cq.from_user)
         is_premium = session.get("is_premium", False)
 
-        # Mark free user as active
         if not is_premium:
             active_uploads_free.add(user_id)
 
@@ -1671,7 +1419,6 @@ def setup_ytupload_handler(app: Client):
 
         overall_start = time()
 
-        # ── Step 1: Download from Telegram ─────────────────────────────────
         await cq.message.edit_text(
             f"📥 **Downloading from Telegram...**\n\n"
             f"📺 **Channel:** `{ch_name}`\n"
@@ -1711,8 +1458,6 @@ def setup_ytupload_handler(app: Client):
             return
 
         actual_size = os.path.getsize(filepath)
-
-        # ── Step 2: YouTube Upload ─────────────────────────────────────────
         yt_progress = {"uploaded": 0, "total": actual_size, "done": False}
 
         def _prog_cb(uploaded, total):
@@ -1747,7 +1492,6 @@ def setup_ytupload_handler(app: Client):
             except Exception:
                 pass
 
-        # Cleanup
         try:
             os.remove(filepath)
         except Exception:
@@ -1803,13 +1547,12 @@ def setup_ytupload_handler(app: Client):
                 yt_result, ch_id, ch_name, elapsed, is_premium,
             ))
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # CALLBACKS
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     @app.on_callback_query(filters.regex(r"^ytup_(pub|prv|unl)_\d+$"))
     async def ytup_privacy_callback(client, cq: CallbackQuery):
-        """Handle privacy selection for both upload modes."""
         data    = cq.data
         chat_id = cq.message.chat.id
         user_id = cq.from_user.id
@@ -1819,7 +1562,6 @@ def setup_ytupload_handler(app: Client):
             await cq.answer("❌ Session expired! Please start again.", show_alert=True)
             return
 
-        # Re-check rate limit at execution time
         is_premium = session.get("is_premium", False)
         allowed, rate_msg = await _check_upload_rate_limit(user_id, is_premium)
         if not allowed:
@@ -1841,7 +1583,6 @@ def setup_ytupload_handler(app: Client):
 
     @app.on_callback_query(filters.regex(r"^ytup_confirm_\d+$"))
     async def ytup_confirm_callback(client, cq: CallbackQuery):
-        """Handle confirm button (shown when privacy flag was passed in command)."""
         chat_id = cq.message.chat.id
         user_id = cq.from_user.id
 
@@ -1868,7 +1609,6 @@ def setup_ytupload_handler(app: Client):
 
     @app.on_callback_query(filters.regex(r"^ytup_cancel_\d+$"))
     async def ytup_cancel_callback(client, cq: CallbackQuery):
-        """Cancel the upload session."""
         chat_id = cq.message.chat.id
         user_id = cq.from_user.id
 
@@ -1888,7 +1628,6 @@ def setup_ytupload_handler(app: Client):
 
     @app.on_callback_query(filters.regex(r"^ytup_goto_connect$"))
     async def ytup_goto_connect_callback(client, cq: CallbackQuery):
-        """Shortcut button: go to /ytconnect instructions."""
         await cq.answer()
         await cq.message.reply_text(
             "Use the command /ytconnect to start connecting your YouTube channel.",
@@ -1897,16 +1636,15 @@ def setup_ytupload_handler(app: Client):
 
     @app.on_callback_query(filters.regex(r"^ytup_goto_me$"))
     async def ytup_goto_me_callback(client, cq: CallbackQuery):
-        """Shortcut button: go to /ytme."""
         await cq.answer()
         await cq.message.reply_text(
             "Use /ytme to see your connected channel information.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # HANDLER REGISTRATION
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
 
     _f = filters.private | filters.group
 
@@ -1931,4 +1669,4 @@ def setup_ytupload_handler(app: Client):
     app.add_handler(MessageHandler(ytsend_command,
         filters.command("ytsend", COMMAND_PREFIX) & _f), group=2)
 
-    LOGGER.info("[ytupload] Handler registered ✅ — Free & Premium, tracking enabled")
+    LOGGER.info("[ytupload] Handler registered ✅")
