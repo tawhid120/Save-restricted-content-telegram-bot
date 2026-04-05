@@ -123,8 +123,14 @@ FREE_COOLDOWN    = 300   # Free users  : 5 minutes between uploads
 PREMIUM_COOLDOWN = 10    # Premium users: 10 seconds between uploads
 
 # ── MongoDB Collections ───────────────────────────────────────────────────────
-yt_tokens_col  = db["yt_user_tokens"]   # Per-user YouTube OAuth tokens
-yt_uploads_col = db["yt_upload_logs"]   # Upload history / tracking logs
+# ── এই দুই line সরাও ─────────────────────────────────────────────────────────
+# yt_tokens_col  = db["yt_user_tokens"]   ❌
+# yt_uploads_col = db["yt_upload_logs"]   ❌
+
+# ── এটা দিয়ে replace করো ────────────────────────────────────────────────────
+# Get the database object from an existing collection, then create new collections
+yt_tokens_col  = daily_limit.database["yt_user_tokens"]    # ✅
+yt_uploads_col = daily_limit.database["yt_upload_logs"]    # ✅
 
 # ── In-memory session stores ──────────────────────────────────────────────────
 ytup_sessions:        dict = {}   # chat_id  → upload session data
