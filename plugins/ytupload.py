@@ -4,9 +4,17 @@
 """
 Multi-User YouTube Direct Upload Handler
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIXES APPLIED:
+  ✅ FIX 1: redirect_uri → "http://localhost" রাখা হয়েছে কিন্তু
+             yt_credentials.json এ "Desktop App" type ব্যবহার করতে হবে
+  ✅ FIX 2: fetch_token() এ authorization_response ভুল parameter সরানো হয়েছে
+  ✅ FIX 3: User-কে browser URL bar থেকে full URL বা শুধু code
+             যেকোনোটা paste করতে বলা হয়েছে
+  ✅ FIX 4: OAUTHLIB_INSECURE_TRANSPORT env set করা হয়েছে
+  ✅ FIX 5: yt_credentials.json এ "installed" type check যোগ করা হয়েছে
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Features:
   • Per-user YouTube Channel OAuth — each user uploads to their own channel
-  • Per-user API Credentials       — each user provides their own client_secret.json
   • Mode 1: Telegram Video Reply  → YouTube Upload
   • Mode 2: Any Website URL       → yt-dlp download → YouTube Upload
   • Free users  : 1 upload at a time, 5-min cooldown between uploads
@@ -14,12 +22,10 @@ Features:
   • Privacy control : public / private / unlisted
   • Custom title & description support
   • Referer / HLS / CDN protected stream support
-  • Professional tracking & logging
+  • Professional tracking & logging (matches ytdl.py style)
   • Full in-bot tutorial via /ythelp
-
 Commands:
-  /set_api                — Upload your client_secret.json to register API credentials
-  /ytconnect              — Connect your YouTube Channel (requires /set_api first)
+  /ytconnect              — Connect your YouTube Channel
   /ytcode <code>          — Submit OAuth authorization code
   /ytdisconnect           — Disconnect your YouTube Channel
   /ytme                   — View connected channel info
@@ -43,6 +49,9 @@ import tempfile
 from io import BytesIO
 from time import time
 from datetime import datetime
+
+# ✅ FIX: OAUTHLIB_INSECURE_TRANSPORT set করা — http://localhost allow করার জন্য
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -95,22 +104,23 @@ except ImportError:
 # CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SCOPES = [
+SCOPES           = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
-
-# NOTE: CREDENTIALS_FILE is no longer used as the primary source.
-# Each user now provides their own client_secret.json via /set_api.
-# This constant is kept only as a fallback reference name.
 CREDENTIALS_FILE = "yt_credentials.json"
 
-YT_TITLE_MAX  = 100
-YT_DESC_MAX   = 5000
-YT_TAG_MAX    = 10
-YT_CHUNK_SIZE = 5 * 1024 * 1024
+# ✅ FIX: redirect_uri → http://localhost (Desktop App type-এ এটাই সঠিক)
+# Google Cloud Console-এ "Desktop App" type credential তৈরি করলে
+# http://localhost automatically allowed থাকে
+REDIRECT_URI = "http://localhost"
 
-SESSION_EXPIRY = 900  # 15 minutes
+YT_TITLE_MAX    = 100
+YT_DESC_MAX     = 5000
+YT_TAG_MAX      = 10
+YT_CHUNK_SIZE   = 5 * 1024 * 1024
+
+SESSION_EXPIRY  = 900
 
 PRIVACY_OPTIONS = ["public", "private", "unlisted"]
 PRIVACY_LABELS  = {
@@ -120,55 +130,27 @@ PRIVACY_LABELS  = {
 }
 PRIVACY_FROM_CB = {"pub": "public", "prv": "private", "unl": "unlisted"}
 
-FREE_COOLDOWN    = 300   # 5 minutes
-PREMIUM_COOLDOWN = 10    # 10 seconds
+FREE_COOLDOWN    = 300
+PREMIUM_COOLDOWN = 10
 
 # ── MongoDB Collections ───────────────────────────────────────────────────────
 yt_tokens_col  = daily_limit.database["yt_user_tokens"]
 yt_uploads_col = daily_limit.database["yt_upload_logs"]
 
 # ── In-memory session stores ──────────────────────────────────────────────────
-ytup_sessions:        dict = {}   # chat_id  → upload session data
-oauth_sessions:       dict = {}   # user_id  → OAuth flow session
-user_last_upload:     dict = {}   # user_id  → timestamp of last upload
-active_uploads_free:  set  = set()  # set of free-tier user_ids with active uploads
+ytup_sessions:        dict = {}
+oauth_sessions:       dict = {}
+user_last_upload:     dict = {}
+active_uploads_free:  set  = set()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PROMPT TEXT — shown when user hasn't set their API creds yet
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SET_API_PROMPT = (
-    "🔑 **API Credentials Required!**\n\n"
-    "To use YouTube upload features, you must first provide your own "
-    "Google OAuth 2.0 credentials.\n\n"
-    "**Why?**\n"
-    "Each user must use their own Google Cloud Project credentials to "
-    "avoid 'App Not Verified' / 'Access Blocked' errors.\n\n"
-    "**How to get your credentials:**\n"
-    "1️⃣ Go to [Google Cloud Console](https://console.cloud.google.com/)\n"
-    "2️⃣ Create a new project (or select existing)\n"
-    "3️⃣ Enable **YouTube Data API v3**\n"
-    "4️⃣ Go to **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**\n"
-    "5️⃣ Choose **Desktop App** as application type\n"
-    "6️⃣ Download the JSON file\n"
-    "7️⃣ Add yourself as a **Test User** in the OAuth Consent Screen\n\n"
-    "**Then send:**\n"
-    "`/set_api` and attach the downloaded JSON file as a document\n\n"
-    "📖 Need help? Use /ythelp"
-)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RATE LIMIT CHECKER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple:
-    """
-    Returns (allowed: bool, message: str).
-    Checks both concurrent-upload lock (free users) and cooldown timer.
-    """
     cooldown = PREMIUM_COOLDOWN if is_premium else FREE_COOLDOWN
 
-    # Free users: only one simultaneous upload allowed
     if not is_premium and user_id in active_uploads_free:
         return False, (
             "⏳ **Upload in Progress!**\n\n"
@@ -185,9 +167,7 @@ async def _check_upload_rate_limit(user_id: int, is_premium: bool) -> tuple:
         wait_str  = get_readable_time(remaining)
 
         if is_premium:
-            return False, (
-                f"⏳ Please wait **{wait_str}** before starting another upload."
-            )
+            return False, f"⏳ Please wait **{wait_str}** before starting another upload."
         else:
             return False, (
                 f"⏳ **Cooldown Active!**\n\n"
@@ -213,102 +193,10 @@ async def _is_premium(user_id: int) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MONGODB — CUSTOM API CREDENTIALS MANAGER
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async def _save_user_api_creds(user_id: int, client_config: dict) -> None:
-    """
-    Save the user's client_secret JSON object into their MongoDB document.
-    The entire parsed JSON dict is stored in the 'custom_api_creds' field.
-    No files are written to disk.
-    """
-    await yt_tokens_col.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "custom_api_creds": client_config,
-                "api_set_at":       datetime.utcnow(),
-                # Invalidate any old token when new creds are set,
-                # because the old token was issued by a different OAuth client.
-                "token":            None,
-                "channel_id":       None,
-                "channel_name":     None,
-            },
-            "$setOnInsert": {"connected_at": None},
-        },
-        upsert=True,
-    )
-    LOGGER.info(f"[ytupload] Custom API creds saved for user {user_id}")
-
-
-async def _get_user_api_creds(user_id: int) -> dict | None:
-    """
-    Retrieve the user's stored client_secret JSON dict from MongoDB.
-    Returns None if the user hasn't set their credentials yet.
-    """
-    rec = await yt_tokens_col.find_one(
-        {"user_id": user_id},
-        {"custom_api_creds": 1},
-    )
-    if not rec:
-        return None
-    return rec.get("custom_api_creds") or None
-
-
-async def _has_user_api_creds(user_id: int) -> bool:
-    """Quick check: does this user have custom API creds stored?"""
-    creds = await _get_user_api_creds(user_id)
-    return creds is not None
-
-
-def _validate_client_config(config: dict) -> tuple[bool, str]:
-    """
-    Validate that the uploaded JSON is a proper OAuth 2.0 Desktop client config.
-    Returns (is_valid: bool, error_message: str).
-    """
-    # The JSON must have either 'installed' or 'web' key (Desktop = 'installed')
-    client_type = None
-    if "installed" in config:
-        client_type = "installed"
-    elif "web" in config:
-        client_type = "web"
-    else:
-        return False, (
-            "❌ **Invalid JSON format!**\n\n"
-            "The file must be a Google OAuth 2.0 client secret JSON.\n"
-            "It should contain an `installed` or `web` key.\n\n"
-            "Make sure you downloaded the correct file from Google Cloud Console."
-        )
-
-    # Check required fields inside the client config
-    inner      = config[client_type]
-    required   = ["client_id", "client_secret", "auth_uri", "token_uri"]
-    missing    = [f for f in required if not inner.get(f)]
-
-    if missing:
-        return False, (
-            f"❌ **Incomplete credentials!**\n\n"
-            f"Missing required fields: `{', '.join(missing)}`\n\n"
-            f"Please download a fresh copy from Google Cloud Console."
-        )
-
-    # Warn if it's a 'web' type instead of 'installed' (Desktop)
-    if client_type == "web":
-        # Still allow it but note that Desktop App type is recommended
-        LOGGER.warning(
-            f"[ytupload] User uploaded 'web' type credentials. "
-            f"'installed' (Desktop App) is recommended."
-        )
-
-    return True, ""
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MONGODB — TOKEN MANAGER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _save_user_token(user_id: int, creds, channel_info: dict):
-    """Persist OAuth token + channel metadata into MongoDB."""
     now = datetime.utcnow()
     await yt_tokens_col.update_one(
         {"user_id": user_id},
@@ -327,12 +215,6 @@ async def _save_user_token(user_id: int, creds, channel_info: dict):
 
 
 async def _load_user_token(user_id: int):
-    """
-    Load and validate a user's OAuth token from MongoDB.
-    If the token is expired, attempt to refresh it using the user's
-    own stored client credentials (NOT a global credentials file).
-    Returns a valid Credentials object or None.
-    """
     if not GOOGLE_API_AVAILABLE:
         return None
 
@@ -351,52 +233,12 @@ async def _load_user_token(user_id: int):
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
-                # ── KEY CHANGE ─────────────────────────────────────────────
-                # Use the user's own stored API credentials for the refresh
-                # request, instead of relying on a global credentials file.
-                # This ensures the refresh is authenticated with the correct
-                # OAuth client that originally issued the token.
-                client_config = rec.get("custom_api_creds")
-                if client_config:
-                    client_type = "installed" if "installed" in client_config else "web"
-                    inner       = client_config[client_type]
-
-                    # Rebuild token_uri / client_id / client_secret from the
-                    # user's stored config so the refresh call is self-contained.
-                    import google.auth.transport.requests
-                    import requests as _requests
-
-                    refreshed_creds = Credentials(
-                        token         = creds.token,
-                        refresh_token = creds.refresh_token,
-                        token_uri     = inner.get(
-                            "token_uri", "https://oauth2.googleapis.com/token"
-                        ),
-                        client_id     = inner.get("client_id"),
-                        client_secret = inner.get("client_secret"),
-                        scopes        = SCOPES,
-                    )
-                    refreshed_creds.refresh(
-                        google.auth.transport.requests.Request(
-                            session=_requests.Session()
-                        )
-                    )
-                    creds = refreshed_creds
-                else:
-                    # Fallback: try the standard refresh (may fail without client info)
-                    creds.refresh(Request())
-
+                creds.refresh(Request())
                 await yt_tokens_col.update_one(
                     {"user_id": user_id},
-                    {
-                        "$set": {
-                            "token":      creds.to_json(),
-                            "updated_at": datetime.utcnow(),
-                        }
-                    },
+                    {"$set": {"token": creds.to_json(), "updated_at": datetime.utcnow()}},
                 )
                 LOGGER.info(f"[ytupload] Token auto-refreshed for user {user_id}")
-
             except Exception as e:
                 LOGGER.warning(f"[ytupload] Token refresh failed for {user_id}: {e}")
                 return None
@@ -407,22 +249,8 @@ async def _load_user_token(user_id: int):
 
 
 async def _delete_user_token(user_id: int) -> bool:
-    """
-    Remove only the OAuth token & channel info from the user's document.
-    Preserve 'custom_api_creds' so the user doesn't need to re-upload their JSON.
-    """
-    result = await yt_tokens_col.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "token":        None,
-                "channel_id":   None,
-                "channel_name": None,
-                "updated_at":   datetime.utcnow(),
-            }
-        },
-    )
-    return result.modified_count > 0
+    result = await yt_tokens_col.delete_one({"user_id": user_id})
+    return result.deleted_count > 0
 
 
 async def _get_user_channel_info(user_id: int):
@@ -433,53 +261,99 @@ async def _get_user_channel_info(user_id: int):
 
 
 async def _is_youtube_connected(user_id: int) -> bool:
-    """Check if the user has a valid, usable OAuth token."""
     creds = await _load_user_token(user_id)
     return creds is not None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# OAUTH FLOW — Per-user credentials from MongoDB
+# ✅ FIX: OAUTH FLOW — সম্পূর্ণ নতুন ও সঠিক implementation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _create_oauth_flow_from_config(client_config: dict):
+def _validate_credentials_file() -> tuple:
     """
-    Build a Google OAuth2 Flow object directly from the user's client_config
-    dict (which was read from MongoDB), without touching any local file.
-
-    Uses Flow.from_client_config() instead of Flow.from_client_secrets_file().
+    yt_credentials.json validate করে।
+    Returns: (is_valid: bool, error_message: str)
+    
+    ✅ yt_credentials.json অবশ্যই "installed" type হতে হবে (Desktop App)।
+    "web" type হলে redirect_uri mismatch error হবে।
     """
-    try:
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=SCOPES,
-            redirect_uri="http://localhost",
+    if not os.path.exists(CREDENTIALS_FILE):
+        return False, (
+            f"❌ `{CREDENTIALS_FILE}` ফাইলটি পাওয়া যাচ্ছে না!\n\n"
+            "**সমাধান:**\n"
+            "1️⃣ [Google Cloud Console](https://console.cloud.google.com/) যান\n"
+            "2️⃣ APIs & Services → Credentials\n"
+            "3️⃣ **`+ CREATE CREDENTIALS`** → **`OAuth client ID`**\n"
+            "4️⃣ Application type: **`Desktop App`** বেছে নিন\n"
+            "5️⃣ JSON download করে বটের folder-এ `yt_credentials.json` নামে রাখুন"
         )
-        return flow
+    
+    try:
+        with open(CREDENTIALS_FILE, "r") as f:
+            data = json.load(f)
+        
+        # ✅ FIX: "installed" key check — Desktop App type verify করা
+        if "installed" not in data:
+            if "web" in data:
+                return False, (
+                    "❌ **ভুল Credential Type!**\n\n"
+                    "`yt_credentials.json` এ **Web Application** type credential আছে।\n"
+                    "এটা **Desktop App** type হতে হবে।\n\n"
+                    "**সমাধান:**\n"
+                    "1️⃣ [Google Cloud Console](https://console.cloud.google.com/) যান\n"
+                    "2️⃣ APIs & Services → Credentials\n"
+                    "3️⃣ নতুন credential তৈরি করুন: **`Desktop App`** type\n"
+                    "4️⃣ JSON download করে replace করুন"
+                )
+            return False, (
+                "❌ **Invalid Credential Format!**\n\n"
+                "`yt_credentials.json` এর format সঠিক নয়।\n"
+                "Google Cloud Console থেকে নতুন করে download করুন।"
+            )
+        
+        return True, ""
+    except json.JSONDecodeError:
+        return False, "❌ `yt_credentials.json` valid JSON নয়। ফাইলটি corrupt হয়েছে।"
     except Exception as e:
-        LOGGER.error(f"[ytupload] OAuth flow creation error: {e}")
-        return None
+        return False, f"❌ Credentials file error: `{str(e)[:100]}`"
+
+
+def _create_oauth_flow():
+    """
+    ✅ FIX: Correct OAuth Flow তৈরি করা।
+    - redirect_uri = "http://localhost" (Desktop App type-এ automatically allowed)
+    - OAUTHLIB_INSECURE_TRANSPORT = "1" set করা হয়েছে উপরে
+    """
+    is_valid, err_msg = _validate_credentials_file()
+    if not is_valid:
+        LOGGER.error(f"[ytupload] Credentials validation failed: {err_msg}")
+        return None, err_msg
+    
+    try:
+        flow = Flow.from_client_secrets_file(
+            CREDENTIALS_FILE,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI,  # "http://localhost"
+        )
+        return flow, ""
+    except Exception as e:
+        err = f"OAuth flow তৈরিতে error: `{str(e)[:150]}`"
+        LOGGER.error(f"[ytupload] OAuth flow error: {e}")
+        return None, err
 
 
 def _fetch_channel_info_sync(creds) -> dict:
-    """Synchronous helper to fetch YouTube channel info using the given creds."""
     try:
         youtube  = build("youtube", "v3", credentials=creds)
-        response = (
-            youtube.channels()
-            .list(part="snippet,statistics", mine=True)
-            .execute()
-        )
-        items = response.get("items", [])
+        response = youtube.channels().list(part="snippet,statistics", mine=True).execute()
+        items    = response.get("items", [])
         if not items:
             return {"id": "", "title": "Unknown Channel"}
         item = items[0]
         return {
             "id":          item.get("id", ""),
             "title":       item["snippet"].get("title", "Unknown"),
-            "subscribers": int(
-                item.get("statistics", {}).get("subscriberCount", 0) or 0
-            ),
+            "subscribers": int(item.get("statistics", {}).get("subscriberCount", 0) or 0),
         }
     except Exception as e:
         LOGGER.warning(f"[ytupload] Channel info fetch error: {e}")
@@ -492,18 +366,14 @@ def _fetch_channel_info_sync(creds) -> dict:
 
 def _upload_file_to_youtube_sync(
     creds,
-    filepath:       str,
-    title:          str,
-    description:    str  = "",
-    tags:           list = None,
-    privacy_status: str  = "public",
-    category_id:    str  = "22",
+    filepath: str,
+    title: str,
+    description: str = "",
+    tags: list = None,
+    privacy_status: str = "public",
+    category_id: str = "22",
     progress_cb=None,
 ) -> tuple:
-    """
-    Blocking upload function — runs inside a thread-pool executor.
-    Returns (success: bool, video_id_or_error: str).
-    """
     youtube = build("youtube", "v3", credentials=creds)
 
     title       = (title or "Untitled")[:YT_TITLE_MAX]
@@ -524,13 +394,9 @@ def _upload_file_to_youtube_sync(
     }
 
     try:
-        media = MediaFileUpload(
-            filepath,
-            mimetype="video/mp4",
-            resumable=True,
-            chunksize=YT_CHUNK_SIZE,
-        )
-        request  = youtube.videos().insert(
+        media   = MediaFileUpload(filepath, mimetype="video/mp4",
+                                  resumable=True, chunksize=YT_CHUNK_SIZE)
+        request = youtube.videos().insert(
             part=",".join(body.keys()), body=body, media_body=media
         )
         response = None
@@ -555,10 +421,7 @@ def _upload_file_to_youtube_sync(
         if "quotaExceeded" in err:
             return False, "📊 YouTube API quota exceeded. Please try again tomorrow."
         if "forbidden" in err.lower() or "403" in err:
-            return (
-                False,
-                "🔒 YouTube permission denied. Please use /ytdisconnect then /ytconnect.",
-            )
+            return False, "🔒 YouTube permission denied. Please use /ytdisconnect then /ytconnect."
         if "uploadLimitExceeded" in err:
             return False, "🚫 YouTube daily upload limit reached."
         return False, f"YouTube API error: {err[:200]}"
@@ -572,11 +435,7 @@ def _parse_upload_flags(raw: str) -> dict:
     raw = raw.strip()
 
     privacy = "public"
-    for flag, val in [
-        ("--private",  "private"),
-        ("--unlisted", "unlisted"),
-        ("--public",   "public"),
-    ]:
+    for flag, val in [("--private", "private"), ("--unlisted", "unlisted"), ("--public", "public")]:
         if flag in raw:
             privacy = val
             raw     = raw.replace(flag, "").strip()
@@ -586,17 +445,12 @@ def _parse_upload_flags(raw: str) -> dict:
         m = re.search(pattern, raw, re.IGNORECASE)
         if m:
             custom_title = m.group(1).strip()
-            raw          = (raw[: m.start()] + raw[m.end() :]).strip()
+            raw          = (raw[:m.start()] + raw[m.end():]).strip()
             break
 
     url, referer = parse_url_and_referer(raw) if raw else (None, None)
 
-    return {
-        "url":          url,
-        "referer":      referer,
-        "privacy":      privacy,
-        "custom_title": custom_title,
-    }
+    return {"url": url, "referer": referer, "privacy": privacy, "custom_title": custom_title}
 
 
 def _parse_ytsend_flags(raw: str) -> dict:
@@ -609,20 +463,20 @@ def _parse_ytsend_flags(raw: str) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _save_upload_log(
-    user_id:      int,
-    user_name:    str,
-    source_type:  str,
-    source_url:   str,
-    yt_video_id:  str,
-    yt_title:     str,
-    privacy:      str,
-    file_size:    int,
-    status:       str,
-    error_msg:    str   = "",
-    channel_id:   str   = "",
-    channel_name: str   = "",
-    elapsed_sec:  float = 0,
-    is_premium:   bool  = False,
+    user_id: int,
+    user_name: str,
+    source_type: str,
+    source_url: str,
+    yt_video_id: str,
+    yt_title: str,
+    privacy: str,
+    file_size: int,
+    status: str,
+    error_msg: str = "",
+    channel_id: str = "",
+    channel_name: str = "",
+    elapsed_sec: float = 0,
+    is_premium: bool = False,
 ):
     try:
         await yt_uploads_col.insert_one({
@@ -654,17 +508,17 @@ async def _save_upload_log(
 async def _log_to_group(
     client,
     user,
-    source_type:  str,
-    source_url:   str,
-    video_title:  str,
-    yt_video_id:  str,
+    source_type: str,
+    source_url: str,
+    video_title: str,
+    yt_video_id: str,
     channel_name: str,
-    privacy:      str,
-    file_size:    int,
-    status:       str,
-    elapsed_sec:  float = 0,
-    error_msg:    str   = "",
-    is_premium:   bool  = False,
+    privacy: str,
+    file_size: int,
+    status: str,
+    elapsed_sec: float = 0,
+    error_msg: str = "",
+    is_premium: bool = False,
 ):
     if not LOG_GROUP_ID:
         return
@@ -676,13 +530,13 @@ async def _log_to_group(
         username  = f"@{user.username}" if getattr(user, "username", None) else "N/A"
         user_link = f"[{full_name}](tg://user?id={user_id})"
 
-        status_icon = "✅" if status == "success" else "❌"
-        status_text = "Success" if status == "success" else "Failed"
-        src_icon    = "📨 Telegram" if source_type == "telegram" else "🌐 URL"
-        plan_badge  = "⭐ Premium" if is_premium else "🆓 Free"
-        elapsed_str = get_readable_time(int(elapsed_sec)) if elapsed_sec > 0 else "N/A"
-        size_str    = get_readable_file_size(file_size) if file_size > 0 else "N/A"
-        yt_url      = f"https://youtu.be/{yt_video_id}" if yt_video_id else "N/A"
+        status_icon  = "✅" if status == "success" else "❌"
+        status_text  = "Success"  if status == "success" else "Failed"
+        src_icon     = "📨 Telegram" if source_type == "telegram" else "🌐 URL"
+        plan_badge   = "⭐ Premium" if is_premium else "🆓 Free"
+        elapsed_str  = get_readable_time(int(elapsed_sec)) if elapsed_sec > 0 else "N/A"
+        size_str     = get_readable_file_size(file_size) if file_size > 0 else "N/A"
+        yt_url       = f"https://youtu.be/{yt_video_id}" if yt_video_id else "N/A"
 
         text = (
             f"📤 **YT Upload Tracker** {status_icon}\n"
@@ -730,9 +584,9 @@ async def _log_failed_attempt(
     client,
     user,
     source_type: str,
-    source_url:  str,
-    error_msg:   str,
-    is_premium:  bool = False,
+    source_url: str,
+    error_msg: str,
+    is_premium: bool = False,
 ):
     if not LOG_GROUP_ID:
         return
@@ -775,7 +629,6 @@ async def _log_failed_attempt(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def _yt_upload_progress_updater(msg, progress_data: dict):
-    """Polls progress_data every 4 seconds and edits the status message."""
     last_text = ""
     while not progress_data.get("done"):
         await asyncio.sleep(4)
@@ -838,6 +691,7 @@ def _user_display(user) -> str:
 # TUTORIAL TEXT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# ✅ FIX: Help text update — সঠিক নির্দেশনা যোগ করা হয়েছে
 HELP_TEXT = """
 📺 **YouTube Upload — Complete Guide**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -845,26 +699,17 @@ HELP_TEXT = """
 Upload videos directly to your own YouTube Channel!
 
 ─────────────────────────────────────
-🔑 **STEP 0 — Set Your API Credentials (One-time)**
-
-Each user must provide their own Google API credentials.
-This solves the "Access Blocked / App Not Verified" error.
-
-1️⃣  Go to [Google Cloud Console](https://console.cloud.google.com/)
-2️⃣  Create a project → Enable **YouTube Data API v3**
-3️⃣  Create **OAuth 2.0 Client ID** → Choose **Desktop App**
-4️⃣  Add yourself as a **Test User** in OAuth Consent Screen
-5️⃣  Download the JSON file
-6️⃣  Send `/set_api` and attach the JSON file as a document
-
-─────────────────────────────────────
 🔐 **STEP 1 — Connect Your YouTube Channel**
 
 1️⃣  Send: `/ytconnect`
 2️⃣  Open the Google Login Link in your browser
 3️⃣  Sign in and tap **Allow**
-4️⃣  Copy the **Authorization Code**
-5️⃣  Send: `/ytcode YOUR_CODE_HERE`
+4️⃣  Browser-এ `localhost refused to connect` দেখাবে — এটা স্বাভাবিক!
+5️⃣  Browser-এর **URL bar** থেকে পুরো URL টা copy করুন
+     (যেমন: `http://localhost/?code=4/0AX...&scope=...`)
+6️⃣  সেই URL বা শুধু code বটে পাঠান:
+     `/ytcode http://localhost/?code=4/0AX...`
+     অথবা শুধু `/ytcode 4/0AX...`
 
 ─────────────────────────────────────
 🌐 **STEP 2A — Upload from any Website URL**
@@ -885,10 +730,18 @@ Reply to the video and send: `/ytsend`
 ─────────────────────────────────────
 📋 **Other Commands**
 
-`/set_api`       — Upload your Google API credentials (required once)
 `/ytme`          — View connected channel info
 `/ytdisconnect`  — Disconnect your YouTube channel
 `/ythelp`        — Show this guide again
+
+─────────────────────────────────────
+⚠️ **Admin Setup (একবারই করতে হবে)**
+
+`yt_credentials.json` তৈরির নিয়ম:
+• Google Cloud Console → APIs & Services → Credentials
+• `+ CREATE CREDENTIALS` → `OAuth client ID`
+• Application type: **Desktop App** (Web নয়!)
+• JSON download করে বটের folder-এ রাখুন
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """.strip()
@@ -901,164 +754,6 @@ Reply to the video and send: `/ytsend`
 def setup_ytupload_handler(app: Client):
 
     # ═══════════════════════════════════════════════════════════
-    # /set_api — Receive and store user's client_secret.json
-    # ═══════════════════════════════════════════════════════════
-
-    async def set_api_command(client: Client, message: Message):
-        """
-        Handler for /set_api.
-
-        Usage A (with attached document):
-            User sends /set_api WITH the JSON file attached as a document.
-
-        Usage B (command only):
-            Bot explains what to do and waits for the user to send the file.
-
-        This handler supports both cases. When no document is attached,
-        it sends instructions. When a document IS attached (or a document
-        is sent as a reply), it processes and stores the credentials.
-        """
-        user_id = message.from_user.id
-
-        if not GOOGLE_API_AVAILABLE:
-            await message.reply_text(
-                "❌ **Google API library is not installed!**\n\n"
-                "Please contact the bot admin.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Case: command sent without a document ──────────────────────
-        doc = message.document
-        if not doc:
-            # Check if the user already has creds set
-            already_set = await _has_user_api_creds(user_id)
-
-            if already_set:
-                await message.reply_text(
-                    "✅ **API Credentials Already Set!**\n\n"
-                    "You have already uploaded your `client_secret.json`.\n\n"
-                    "To **update** your credentials, send `/set_api` again "
-                    "with the new JSON file attached as a document.\n\n"
-                    "To connect your YouTube channel, use /ytconnect",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            else:
-                await message.reply_text(
-                    "📎 **How to Set Your API Credentials**\n\n"
-                    "Send `/set_api` again with your `client_secret.json` "
-                    "file **attached as a document** in the same message.\n\n"
-                    + SET_API_PROMPT,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
-                )
-            return
-
-        # ── Case: command sent WITH a document ─────────────────────────
-        # Basic file type checks
-        file_name = doc.file_name or ""
-        mime_type = doc.mime_type or ""
-
-        if not (
-            file_name.lower().endswith(".json")
-            or mime_type in ("application/json", "text/plain", "application/octet-stream")
-        ):
-            await message.reply_text(
-                "❌ **Wrong file type!**\n\n"
-                "Please upload a `.json` file downloaded from Google Cloud Console.\n"
-                "The file is usually named `client_secret_*.json`.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # File size sanity check (client_secret.json is always tiny)
-        if doc.file_size and doc.file_size > 64 * 1024:  # 64 KB max
-            await message.reply_text(
-                "❌ **File too large!**\n\n"
-                "A valid `client_secret.json` is always a small file (< 5 KB).\n"
-                "Please make sure you are uploading the correct file.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        status_msg = await message.reply_text(
-            "⏳ **Reading your credentials file...**",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-        # ── Download file content into memory (no disk write) ──────────
-        try:
-            file_bytes = BytesIO()
-            await client.download_media(message, in_memory=True, file_name=file_bytes)
-            file_bytes.seek(0)
-            raw_content = file_bytes.read().decode("utf-8")
-        except Exception as e:
-            LOGGER.error(f"[set_api] File download error for {user_id}: {e}")
-            await status_msg.edit_text(
-                f"❌ **Could not read the file!**\n\n`{str(e)[:150]}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Parse JSON ──────────────────────────────────────────────────
-        try:
-            client_config = json.loads(raw_content)
-        except json.JSONDecodeError as e:
-            await status_msg.edit_text(
-                f"❌ **Invalid JSON!**\n\n"
-                f"The file could not be parsed as JSON.\n"
-                f"Error: `{str(e)[:150]}`\n\n"
-                f"Please re-download the file from Google Cloud Console.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Validate the structure ──────────────────────────────────────
-        is_valid, err_msg = _validate_client_config(client_config)
-        if not is_valid:
-            await status_msg.edit_text(
-                err_msg,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-            return
-
-        # ── Save to MongoDB (no file on disk) ───────────────────────────
-        try:
-            await _save_user_api_creds(user_id, client_config)
-        except Exception as e:
-            LOGGER.error(f"[set_api] MongoDB save error for {user_id}: {e}")
-            await status_msg.edit_text(
-                f"❌ **Database error!**\n\n`{str(e)[:150]}`\n\nPlease try again.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Extract client_id for confirmation display ──────────────────
-        client_type = "installed" if "installed" in client_config else "web"
-        client_id   = client_config[client_type].get("client_id", "N/A")
-        # Mask middle of client_id for display
-        short_id = (
-            client_id[:20] + "..." + client_id[-10:]
-            if len(client_id) > 35
-            else client_id
-        )
-
-        await status_msg.edit_text(
-            f"✅ **API Credentials Saved Successfully!**\n\n"
-            f"**Client Type:** `{client_type.capitalize()}`\n"
-            f"**Client ID:** `{short_id}`\n\n"
-            f"⚠️ **Important:** If you previously connected a YouTube channel, "
-            f"your old token has been invalidated. Please reconnect with /ytconnect\n\n"
-            f"**Next step:** Use /ytconnect to link your YouTube channel.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        LOGGER.info(
-            f"[set_api] User {user_id} ({_user_display(message.from_user)}) "
-            f"saved API credentials. client_type={client_type}"
-        )
-
-    # ═══════════════════════════════════════════════════════════
     # /ythelp
     # ═══════════════════════════════════════════════════════════
 
@@ -1067,7 +762,6 @@ def setup_ytupload_handler(app: Client):
             HELP_TEXT,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔑 Set API Credentials", callback_data="ytup_goto_setapi")],
                 [InlineKeyboardButton("🔗 Connect YouTube Channel", callback_data="ytup_goto_connect")],
                 [InlineKeyboardButton("📊 My Channel Info", callback_data="ytup_goto_me")],
             ]),
@@ -1075,7 +769,7 @@ def setup_ytupload_handler(app: Client):
         )
 
     # ═══════════════════════════════════════════════════════════
-    # /ytconnect — Updated to use per-user MongoDB credentials
+    # /ytconnect — ✅ FIX: সম্পূর্ণ নতুন implementation
     # ═══════════════════════════════════════════════════════════
 
     async def ytconnect_command(client: Client, message: Message):
@@ -1083,47 +777,40 @@ def setup_ytupload_handler(app: Client):
 
         if not GOOGLE_API_AVAILABLE:
             await message.reply_text(
-                "❌ **Google API library is not installed!**\n\nPlease contact the bot admin.",
+                "❌ **Google API library is not installed!**\n\n"
+                "Admin কে বলুন:\n"
+                "`pip install google-api-python-client google-auth-oauthlib google-auth-httplib2`",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # ── GATE: Check if user has set their API credentials ───────────
-        # This is the primary legacy-data & first-time-use guard.
-        client_config = await _get_user_api_creds(user_id)
-        if not client_config:
+        # ✅ FIX: credentials file validate করা
+        is_valid, err_msg = _validate_credentials_file()
+        if not is_valid:
             await message.reply_text(
-                SET_API_PROMPT,
+                err_msg,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📖 How to get credentials → /ythelp",
-                                          callback_data="ytup_goto_help")],
-                ]),
             )
             return
 
-        # ── Check if already connected ──────────────────────────────────
         existing = await _get_user_channel_info(user_id)
         if existing and existing.get("channel_name"):
-            creds = await _load_user_token(user_id)
-            if creds:
-                await message.reply_text(
-                    f"✅ **Already Connected!**\n\n"
-                    f"📺 **Channel:** `{existing['channel_name']}`\n\n"
-                    f"To connect a different channel, first use /ytdisconnect.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                return
+            await message.reply_text(
+                f"✅ **Already Connected!**\n\n"
+                f"📺 **Channel:** `{existing['channel_name']}`\n\n"
+                f"To connect a different channel, first use /ytdisconnect.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
 
-        # ── Build OAuth flow from user's MongoDB config ─────────────────
-        flow = _create_oauth_flow_from_config(client_config)
+        # ✅ FIX: flow তৈরি করা ও error handle করা
+        flow, flow_err = _create_oauth_flow()
         if not flow:
             await message.reply_text(
-                "❌ **OAuth setup error!**\n\n"
-                "Your stored credentials may be malformed.\n"
-                "Please re-upload them using /set_api.",
+                f"❌ **OAuth Setup Error!**\n\n{flow_err}",
                 parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
             )
             return
 
@@ -1135,21 +822,29 @@ def setup_ytupload_handler(app: Client):
 
         oauth_sessions[user_id] = {"flow": flow, "created_at": time()}
 
+        # ✅ FIX: User-কে সঠিক নির্দেশনা দেওয়া হচ্ছে
+        # localhost refused হবে — এটা expected, URL থেকে code copy করতে হবে
         await message.reply_text(
             "🔐 **Connect Your YouTube Channel**\n\n"
-            "**Step 1** — Click the link below:\n"
+            "**Step 1** — নিচের link-এ click করুন:\n"
             f"[👉 Sign in with Google]({auth_url})\n\n"
-            "**Step 2** — Sign in and tap **Allow**\n\n"
-            "**Step 3** — Copy the **Authorization Code** shown\n\n"
-            "**Step 4** — Send it here:\n"
-            "`/ytcode YOUR_CODE`\n\n"
-            "⏳ _This session expires in 15 minutes._",
+            "**Step 2** — Sign in করে **Allow** tap করুন\n\n"
+            "**Step 3** — Browser-এ এরকম দেখাবে:\n"
+            "```\nThis site can't be reached\nlocalhost refused to connect\n```\n"
+            "⚠️ **এটা স্বাভাবিক! ভয় পাবেন না।**\n\n"
+            "**Step 4** — Browser-এর **🔗 URL bar** থেকে\n"
+            "পুরো URL টা copy করুন:\n"
+            "`http://localhost/?code=4/0AX4XfW...&scope=...`\n\n"
+            "**Step 5** — সেই URL বটে পাঠান:\n"
+            "`/ytcode http://localhost/?code=4/0AX4XfW...`\n\n"
+            "_(শুধু code-ও দিতে পারেন)_\n\n"
+            "⏳ _এই session ১৫ মিনিট পর expire হবে।_",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
 
     # ═══════════════════════════════════════════════════════════
-    # /ytcode
+    # /ytcode — ✅ FIX: সম্পূর্ণ নতুন fetch_token implementation
     # ═══════════════════════════════════════════════════════════
 
     async def ytcode_command(client: Client, message: Message):
@@ -1157,24 +852,21 @@ def setup_ytupload_handler(app: Client):
 
         if len(message.command) < 2:
             await message.reply_text(
-                "**Usage:** `/ytcode YOUR_CODE`\n\nFirst start with /ytconnect.",
+                "**Usage:** `/ytcode YOUR_CODE_OR_URL`\n\n"
+                "First start with /ytconnect.\n\n"
+                "**Example:**\n"
+                "`/ytcode http://localhost/?code=4/0AX4XfW...`\n"
+                "অথবা\n"
+                "`/ytcode 4/0AX4XfW...`",
                 parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Guard: must have API creds ──────────────────────────────────
-        if not await _has_user_api_creds(user_id):
-            await message.reply_text(
-                SET_API_PROMPT,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
             )
             return
 
         session = oauth_sessions.get(user_id)
         if not session:
             await message.reply_text(
-                "❌ **No active session found.**\n\nPlease start again with /ytconnect.",
+                "❌ **No active session found.**\n\n"
+                "Please start again with /ytconnect.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -1187,30 +879,48 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        raw_input = message.command[1].strip()
-        # Support both raw code and full redirect URL paste
-        _cm       = re.search(r"[?&]code=([^& ]+)", raw_input)
-        auth_code = _cm.group(1).strip() if _cm else raw_input
-        flow      = session["flow"]
+        # ✅ FIX: user full URL বা শুধু code যেকোনোটা paste করতে পারবে
+        raw_input = " ".join(message.command[1:]).strip()
+        
+        # Full URL থেকে code extract করার চেষ্টা
+        code_match = re.search(r'[?&]code=([^&\s]+)', raw_input)
+        if code_match:
+            auth_code = code_match.group(1).strip()
+            # URL-encoded characters decode করা
+            auth_code = auth_code.replace("%2F", "/").replace("%3D", "=")
+        else:
+            # শুধু code দিয়েছে
+            auth_code = raw_input.strip()
 
+        if not auth_code:
+            await message.reply_text(
+                "❌ **Code খুঁজে পাওয়া যাচ্ছে না!**\n\n"
+                "Browser URL bar থেকে পুরো URL copy করে পাঠান।\n"
+                "Example: `/ytcode http://localhost/?code=4/0AX4XfW...`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        flow       = session["flow"]
         status_msg = await message.reply_text(
-            "🔄 **Verifying your code...**",
+            "🔄 **Code verify করা হচ্ছে...**",
             parse_mode=ParseMode.MARKDOWN,
         )
 
         try:
             loop = asyncio.get_event_loop()
+            
+            # ✅ FIX: সঠিকভাবে fetch_token call করা
+            # শুধু code= parameter দেওয়া হচ্ছে, authorization_response নয়
+            # এটাই Desktop App flow-এর সঠিক পদ্ধতি
             await loop.run_in_executor(
                 None,
-                lambda: flow.fetch_token(
-                    code=auth_code,
-                    authorization_response=f"http://localhost/?code={auth_code}",
-                ),
+                lambda: flow.fetch_token(code=auth_code)
             )
             creds = flow.credentials
 
             await status_msg.edit_text(
-                "📺 **Fetching your channel info...**",
+                "📺 **Channel info fetch করা হচ্ছে...**",
                 parse_mode=ParseMode.MARKDOWN,
             )
             channel_info = await loop.run_in_executor(
@@ -1228,20 +938,45 @@ def setup_ytupload_handler(app: Client):
                 f"✅ **YouTube Connected Successfully!**\n\n"
                 f"📺 **Channel:** `{ch_name}`\n"
                 f"{('🔗 ' + ch_url) if ch_url else ''}\n\n"
-                f"You can now use:\n"
-                f"• `/ytupload <url>` — Upload from any website\n"
-                f"• Reply to a video + `/ytsend` — Upload from Telegram",
+                f"এখন আপনি use করতে পারবেন:\n"
+                f"• `/ytupload <url>` — যেকোনো website থেকে upload\n"
+                f"• Video reply করে `/ytsend` — Telegram থেকে upload",
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
 
         except Exception as e:
-            LOGGER.error(f"[ytupload] OAuth exchange error for {user_id}: {e}")
             oauth_sessions.pop(user_id, None)
+            err_str = str(e)
+            LOGGER.error(f"[ytupload] OAuth exchange error for {user_id}: {err_str}")
+            
+            # ✅ FIX: User-friendly error messages
+            if "invalid_grant" in err_str.lower():
+                err_detail = (
+                    "Code টি invalid বা expired হয়ে গেছে।\n\n"
+                    "• Code একবারই use করা যায়\n"
+                    "• /ytconnect দিয়ে নতুন link নিন\n"
+                    "• Link open করার পরপরই code copy করুন"
+                )
+            elif "redirect_uri_mismatch" in err_str.lower():
+                err_detail = (
+                    "**Redirect URI Mismatch!**\n\n"
+                    "`yt_credentials.json` এ **Desktop App** type credential নেই।\n"
+                    "Google Cloud Console থেকে **Desktop App** type credential তৈরি করুন।"
+                )
+            elif "invalid_client" in err_str.lower():
+                err_detail = (
+                    "**Invalid Client!**\n\n"
+                    "`yt_credentials.json` এর client_id বা client_secret ভুল।\n"
+                    "Google Cloud Console থেকে নতুন করে download করুন।"
+                )
+            else:
+                err_detail = f"`{err_str[:200]}`"
+            
             await status_msg.edit_text(
                 f"❌ **Code Verification Failed!**\n\n"
-                f"Error: `{str(e)[:200]}`\n\n"
-                f"Please try /ytconnect again.",
+                f"{err_detail}\n\n"
+                f"/ytconnect দিয়ে আবার চেষ্টা করুন।",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -1256,9 +991,7 @@ def setup_ytupload_handler(app: Client):
         if deleted:
             await message.reply_text(
                 "✅ **YouTube Disconnected!**\n\n"
-                "Your OAuth token has been removed.\n"
-                "Your API credentials (`/set_api`) are still saved — "
-                "you only need to `/ytconnect` again.\n\n"
+                "Your token has been removed.\n"
                 "To connect again: /ytconnect",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -1275,18 +1008,8 @@ def setup_ytupload_handler(app: Client):
 
     async def ytme_command(client: Client, message: Message):
         user_id    = message.from_user.id
+        info       = await _get_user_channel_info(user_id)
         is_premium = await _is_premium(user_id)
-        has_api    = await _has_user_api_creds(user_id)
-
-        if not has_api:
-            await message.reply_text(
-                SET_API_PROMPT,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-            return
-
-        info = await _get_user_channel_info(user_id)
 
         if not info or not info.get("channel_name"):
             await message.reply_text(
@@ -1296,27 +1019,19 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        creds    = await _load_user_token(user_id)
-        token_ok = creds is not None
-        ch_name  = info.get("channel_name", "Unknown")
-        ch_id    = info.get("channel_id",   "")
-        ch_url   = f"https://youtube.com/channel/{ch_id}" if ch_id else "N/A"
-        conn_at  = info.get("connected_at")
-        conn_str = conn_at.strftime("%d %b %Y, %H:%M UTC") if conn_at else "N/A"
+        creds      = await _load_user_token(user_id)
+        token_ok   = creds is not None
+        ch_name    = info.get("channel_name", "Unknown")
+        ch_id      = info.get("channel_id",   "")
+        ch_url     = f"https://youtube.com/channel/{ch_id}" if ch_id else "N/A"
+        conn_at    = info.get("connected_at")
+        conn_str   = conn_at.strftime("%d %b %Y, %H:%M UTC") if conn_at else "N/A"
 
-        total_ok   = await yt_uploads_col.count_documents(
-            {"user_id": user_id, "status": "success"}
-        )
-        total_fail = await yt_uploads_col.count_documents(
-            {"user_id": user_id, "status": "failed"}
-        )
+        total_ok   = await yt_uploads_col.count_documents({"user_id": user_id, "status": "success"})
+        total_fail = await yt_uploads_col.count_documents({"user_id": user_id, "status": "failed"})
 
-        plan_text = "⭐ Premium" if is_premium else "🆓 Free"
-        cooldown  = (
-            f"{PREMIUM_COOLDOWN} seconds"
-            if is_premium
-            else f"{FREE_COOLDOWN // 60} minutes"
-        )
+        plan_text  = "⭐ Premium" if is_premium else "🆓 Free"
+        cooldown   = f"{PREMIUM_COOLDOWN} seconds" if is_premium else f"{FREE_COOLDOWN // 60} minutes"
 
         await message.reply_text(
             f"📺 **Your YouTube Channel**\n"
@@ -1325,7 +1040,6 @@ def setup_ytupload_handler(app: Client):
             f"**Channel ID:** `{ch_id}`\n"
             f"**URL:** {ch_url}\n\n"
             f"**🔑 Token Status:** {'✅ Valid' if token_ok else '❌ Invalid — please reconnect'}\n"
-            f"**🗝 API Creds:** ✅ Set\n"
             f"**📅 Connected:** `{conn_str}`\n\n"
             f"**📊 Your Upload Stats**\n"
             f"• ✅ Successful: `{total_ok}`\n"
@@ -1349,15 +1063,6 @@ def setup_ytupload_handler(app: Client):
                 "❌ **Google API library is not installed!**\n"
                 "Please contact the bot admin.",
                 parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Gate: API creds required ────────────────────────────────────
-        if not await _has_user_api_creds(user_id):
-            await message.reply_text(
-                SET_API_PROMPT,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
             )
             return
 
@@ -1443,11 +1148,9 @@ def setup_ytupload_handler(app: Client):
                 err or "Video info fetch failed", is_premium,
             ))
             err_low = (err or "").lower()
-            if (
-                (is_hls_url(url) or is_protected_cdn_url(url))
-                and ("403" in err_low or "forbidden" in err_low)
-                and not referer
-            ):
+            if (is_hls_url(url) or is_protected_cdn_url(url)) and (
+                "403" in err_low or "forbidden" in err_low
+            ) and not referer:
                 await status_msg.edit_text(
                     "❌ **403 Forbidden — Access Denied!**\n\n"
                     "This video requires a Referer. Try:\n"
@@ -1493,14 +1196,18 @@ def setup_ytupload_handler(app: Client):
                 f"**Confirm upload?**",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"✅ Upload ({PRIVACY_LABELS[privacy]})",
-                        callback_data=f"ytup_confirm_{message.chat.id}",
-                    )],
-                    [InlineKeyboardButton(
-                        "❌ Cancel",
-                        callback_data=f"ytup_cancel_{message.chat.id}",
-                    )],
+                    [
+                        InlineKeyboardButton(
+                            f"✅ Upload ({PRIVACY_LABELS[privacy]})",
+                            callback_data=f"ytup_confirm_{message.chat.id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel",
+                            callback_data=f"ytup_cancel_{message.chat.id}",
+                        )
+                    ],
                 ]),
                 disable_web_page_preview=True,
             )
@@ -1528,15 +1235,6 @@ def setup_ytupload_handler(app: Client):
             await message.reply_text(
                 "❌ **Google API library not installed!**",
                 parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-
-        # ── Gate: API creds required ────────────────────────────────────
-        if not await _has_user_api_creds(user_id):
-            await message.reply_text(
-                SET_API_PROMPT,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
             )
             return
 
@@ -1575,10 +1273,10 @@ def setup_ytupload_handler(app: Client):
         privacy      = parsed["privacy"]
         custom_title = parsed["custom_title"]
 
-        file_size = getattr(media, "file_size", 0) or 0
-        file_name = getattr(media, "file_name",  None) or ""
-        duration  = getattr(media, "duration",   0) or 0
-        file_id   = media.file_id
+        file_size  = getattr(media, "file_size", 0) or 0
+        file_name  = getattr(media, "file_name", None) or ""
+        duration   = getattr(media, "duration", 0) or 0
+        file_id    = media.file_id
 
         auto_title = (
             custom_title
@@ -1625,14 +1323,18 @@ def setup_ytupload_handler(app: Client):
                 f"**Confirm upload?**",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"✅ Upload ({PRIVACY_LABELS[privacy]})",
-                        callback_data=f"ytup_confirm_{message.chat.id}",
-                    )],
-                    [InlineKeyboardButton(
-                        "❌ Cancel",
-                        callback_data=f"ytup_cancel_{message.chat.id}",
-                    )],
+                    [
+                        InlineKeyboardButton(
+                            f"✅ Upload ({PRIVACY_LABELS[privacy]})",
+                            callback_data=f"ytup_confirm_{message.chat.id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel",
+                            callback_data=f"ytup_cancel_{message.chat.id}",
+                        )
+                    ],
                 ]),
             )
         else:
@@ -1818,6 +1520,7 @@ def setup_ytupload_handler(app: Client):
                     [InlineKeyboardButton("▶️ Watch on YouTube", url=yt_url)],
                 ]),
             )
+
             asyncio.create_task(_log_to_group(
                 client, user_obj, "url", url, title,
                 video_id, ch_name, privacy, file_size, "success", elapsed,
@@ -1980,6 +1683,7 @@ def setup_ytupload_handler(app: Client):
                     [InlineKeyboardButton("▶️ Watch on YouTube", url=yt_url)],
                 ]),
             )
+
             asyncio.create_task(_log_to_group(
                 client, user_obj, "telegram", file_id, title,
                 video_id, ch_name, privacy, actual_size, "success", elapsed,
@@ -2078,16 +1782,11 @@ def setup_ytupload_handler(app: Client):
         ytup_sessions.pop(chat_id, None)
         active_uploads_free.discard(user_id)
 
-        await cq.message.edit_text("❌ **Cancelled.**", parse_mode=ParseMode.MARKDOWN)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^ytup_goto_setapi$"))
-    async def ytup_goto_setapi_callback(client, cq: CallbackQuery):
-        await cq.answer()
-        await cq.message.reply_text(
-            "Use `/set_api` and attach your `client_secret.json` file to get started.",
+        await cq.message.edit_text(
+            "❌ **Cancelled.**",
             parse_mode=ParseMode.MARKDOWN,
         )
+        await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^ytup_goto_connect$"))
     async def ytup_goto_connect_callback(client, cq: CallbackQuery):
@@ -2105,58 +1804,31 @@ def setup_ytupload_handler(app: Client):
             parse_mode=ParseMode.MARKDOWN,
         )
 
-    @app.on_callback_query(filters.regex(r"^ytup_goto_help$"))
-    async def ytup_goto_help_callback(client, cq: CallbackQuery):
-        await cq.answer()
-        await cq.message.reply_text(
-            "Use /ythelp to see the full setup guide.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
     # ═══════════════════════════════════════════════════════════
     # HANDLER REGISTRATION
     # ═══════════════════════════════════════════════════════════
 
     _f = filters.private | filters.group
 
-    app.add_handler(MessageHandler(
-        set_api_command,
-        filters.command("set_api", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ythelp_command,
+        filters.command("ythelp", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ythelp_command,
-        filters.command("ythelp", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytconnect_command,
+        filters.command("ytconnect", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ytconnect_command,
-        filters.command("ytconnect", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytcode_command,
+        filters.command("ytcode", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ytcode_command,
-        filters.command("ytcode", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytdisconnect_command,
+        filters.command("ytdisconnect", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ytdisconnect_command,
-        filters.command("ytdisconnect", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytme_command,
+        filters.command("ytme", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ytme_command,
-        filters.command("ytme", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytupload_command,
+        filters.command("ytupload", COMMAND_PREFIX) & _f), group=2)
 
-    app.add_handler(MessageHandler(
-        ytupload_command,
-        filters.command("ytupload", COMMAND_PREFIX) & _f,
-    ), group=2)
-
-    app.add_handler(MessageHandler(
-        ytsend_command,
-        filters.command("ytsend", COMMAND_PREFIX) & _f,
-    ), group=2)
+    app.add_handler(MessageHandler(ytsend_command,
+        filters.command("ytsend", COMMAND_PREFIX) & _f), group=2)
 
     LOGGER.info("[ytupload] Handler registered ✅")
