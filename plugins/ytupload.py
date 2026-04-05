@@ -55,7 +55,11 @@ from pyrogram.handlers import MessageHandler
 from config import COMMAND_PREFIX, LOG_GROUP_ID
 from utils.logging_setup import LOGGER
 from utils.helper import get_readable_file_size, get_readable_time
-from core import db, prem_plan1, prem_plan2, prem_plan3
+# ── এই line টা সরাও ─────────────────────────────────────────────────────────
+# from core import db, prem_plan1, prem_plan2, prem_plan3   ❌ এটা বাদ দাও
+
+# ── এটা দিয়ে replace করো ────────────────────────────────────────────────────
+from core import daily_limit, prem_plan1, prem_plan2, prem_plan3  # ✅
 
 # ── Shared helpers from ytdl.py ───────────────────────────────────────────────
 from plugins.ytdl import (
