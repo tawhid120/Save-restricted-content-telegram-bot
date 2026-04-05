@@ -261,7 +261,7 @@ def _create_oauth_flow():
         return Flow.from_client_secrets_file(
             CREDENTIALS_FILE,
             scopes=SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+            redirect_uri="http://localhost",
         )
     except Exception as e:
         LOGGER.error(f"[ytupload] OAuth flow error: {e}")
@@ -770,7 +770,10 @@ def setup_ytupload_handler(app: Client):
             )
             return
 
-        auth_code  = message.command[1].strip()
+        raw_input = message.command[1].strip()
+        # user পুরো URL paste করলেও code extract হবে
+        _cm = re.search(r'[?&]code=([^& ]+)', raw_input)
+        auth_code = _cm.group(1).strip() if _cm else raw_input
         flow       = session["flow"]
         status_msg = await message.reply_text(
             "🔄 **Verifying your code...**",
@@ -779,7 +782,10 @@ def setup_ytupload_handler(app: Client):
 
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: flow.fetch_token(code=auth_code))
+            await loop.run_in_executor(None, lambda: flow.fetch_token(
+                code=auth_code,
+                authorization_response=f"http://localhost/?code={auth_code}",
+            ))
             creds = flow.credentials
 
             await status_msg.edit_text(
