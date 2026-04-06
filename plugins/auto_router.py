@@ -9,7 +9,7 @@
 # ═══════════════════════════════════════════════════════════════════
 # ROUTING TABLE:
 # ───────────────────────────────────────────────────────────────────
-# t.me / telegram.me লিংক  → autolink.py   (কোনো conflict নেই)
+# t.me / telegram.me লিংক  → autolink.py   (group=1 handle করে)
 # drive.google.com          → gdl.py        (অটো)
 # mediafire, gofile, etc.   → directdl.py   (অটো)
 # youtube, vimeo, 1000+ sites → ytdl.py    (অটো)
@@ -275,6 +275,12 @@ async def _execute_route(client: Client, message: Message, url: str, route: str)
                 "❌ **Google Drive downloader লোড হয়নি!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
+        except Exception as e:
+            LOGGER.error(f"[AutoRouter] gdrive error: {e}")
+            await message.reply_text(
+                f"❌ **Google Drive error:** `{str(e)[:150]}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
     # ── Torrent / Magnet ──────────────────────────────────────────
     elif route == "aria2":
@@ -316,16 +322,24 @@ async def _execute_route(client: Client, message: Message, url: str, route: str)
                 "❌ **Aria2 downloader লোড হয়নি!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
+        except Exception as e:
+            LOGGER.error(f"[AutoRouter] aria2 error: {e}")
 
     # ── yt-dlp ───────────────────────────────────────────────────
     elif route == "ytdlp":
         try:
             from plugins.ytdl import (
-                _handle_single_video_initiate_public,
-                is_premium_user,
+                get_single_video_info,
+                build_quality_keyboard,
+                ytdl_sessions,
                 _check_rate_limit,
+                is_premium_user,
                 parse_url_and_referer,
+                normalize_url,
+                _is_warp_available,
+                cleanup_expired_sessions,
             )
+            from time import time as _time
 
             url_clean, referer = parse_url_and_referer(url)
             is_prem = await is_premium_user(user_id)
@@ -338,15 +352,67 @@ async def _execute_route(client: Client, message: Message, url: str, route: str)
                 )
                 return
 
-            await _handle_single_video_initiate_public(
-                client, message, url_clean, user_id, is_prem, referer
+            warp_ok = _is_warp_available()
+            status_msg = await message.reply_text(
+                f"🔍 **Analyzing...**\n"
+                f"_{'🟢 WARP active' if warp_ok else '🟡 Direct connection'}_",
+                parse_mode=ParseMode.MARKDOWN,
             )
 
-        except (ImportError, AttributeError):
-            # Fallback: manual command hint
+            loop = asyncio.get_event_loop()
+            info, error_msg = await loop.run_in_executor(
+                None,
+                lambda: get_single_video_info(url_clean, referer),
+            )
+
+            if not info:
+                await status_msg.edit_text(
+                    f"❌ **Video info fetch করা যায়নি!**\n\n"
+                    f"`{error_msg[:200] if error_msg else 'Unknown error'}`\n\n"
+                    f"Manual try: `/ytdl {url_clean[:60]}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            title = (info.get("title", "Unknown") or "Unknown")[:60]
+            duration = info.get("duration", 0) or 0
+            uploader = info.get("uploader", "Unknown") or "Unknown"
+
+            from utils.helper import get_readable_time
+            duration_str = get_readable_time(int(duration)) if duration else "Unknown"
+
+            cleanup_expired_sessions()
+            ytdl_sessions[message.chat.id] = {
+                "user_id":    user_id,
+                "url":        url_clean,
+                "info":       info,
+                "message_id": message.id,
+                "created_at": _time(),
+                "user_obj":   message.from_user,
+                "type":       "single",
+                "referer":    referer,
+            }
+
+            await status_msg.edit_text(
+                f"📹 **{title}**\n\n"
+                f"👤 **Channel:** {uploader}\n"
+                f"⏱ **Duration:** {duration_str}\n\n"
+                f"👇 **Quality বেছে নিন:**",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=build_quality_keyboard(info, message.chat.id, is_playlist=False),
+                disable_web_page_preview=True,
+            )
+
+        except (ImportError, AttributeError) as e:
+            LOGGER.warning(f"[AutoRouter] ytdlp import error: {e}")
             await message.reply_text(
-                f"🎬 **yt-dlp downloader লোড হয়নি।**\n\n"
-                f"Manual: `/ytdl {url[:60]}`",
+                f"🎬 **Manual command ব্যবহার করুন:**\n`/ytdl {url[:60]}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            LOGGER.error(f"[AutoRouter] ytdlp error: {e}")
+            await message.reply_text(
+                f"❌ **Error:** `{str(e)[:150]}`\n\nManual: `/ytdl {url[:60]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -367,20 +433,96 @@ async def _execute_route(client: Client, message: Message, url: str, route: str)
 
         except ImportError:
             await message.reply_text(
-                "❌ **DirectDL downloader লোড হয়নি!**",
+                "❌ **DirectDL downloader লোড হয়নি!**\n\n"
+                f"Manual: `/ddl {url[:60]}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            LOGGER.error(f"[AutoRouter] directdl error: {e}")
+            await message.reply_text(
+                f"❌ **Error:** `{str(e)[:150]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
     # ── Generic HTTP URL ──────────────────────────────────────────
     elif route == "urldl":
         try:
-            from plugins.urldl import _process_url_download
+            from plugins.urldl import (
+                _get_file_info,
+                _process_url_download,
+                _is_premium as _urldl_is_premium,
+                _check_cooldown,
+                MAX_FILE_SIZE,
+                FREE_FILE_LIMIT,
+                _active_downloads,
+            )
+            import uuid
+            from utils.helper import get_readable_file_size
 
-            await _process_url_download(client, message, url)
+            is_prem = await _urldl_is_premium(user_id)
+
+            # Cooldown check
+            remaining = await _check_cooldown(user_id, is_prem)
+            if remaining > 0:
+                mins, secs = divmod(remaining, 60)
+                await message.reply_text(
+                    f"⏳ **{mins}m {secs}s** পরে আবার চেষ্টা করুন।\n\n"
+                    f"💎 Upgrade করুন: /plans",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            if user_id in _active_downloads:
+                await message.reply_text(
+                    "⏳ **একটি download চলছে!** শেষ হওয়ার পর চেষ্টা করুন।",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            max_size = MAX_FILE_SIZE if is_prem else FREE_FILE_LIMIT
+
+            # File info fetch
+            file_size, filename = await _get_file_info(url)
+
+            if file_size > 0 and file_size > max_size:
+                await message.reply_text(
+                    f"❌ **File too large!**\n\n"
+                    f"📦 Size: `{get_readable_file_size(file_size)}`\n"
+                    f"🚫 Limit: `{get_readable_file_size(max_size)}`\n\n"
+                    + ("💎 Upgrade: /plans" if not is_prem else ""),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            size_display = get_readable_file_size(file_size) if file_size > 0 else "Unknown"
+
+            _active_downloads.add(user_id)
+
+            status_msg = await message.reply_text(
+                f"⬇️ **Download শুরু হচ্ছে...**\n\n"
+                f"📄 `{filename}`\n"
+                f"📦 `{size_display}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+            asyncio.create_task(
+                _process_url_download(
+                    client, message, url, filename, status_msg, is_prem
+                )
+            )
 
         except ImportError:
+            # urldl না থাকলে aiohttp দিয়ে সরাসরি download করার চেষ্টা
+            LOGGER.warning("[AutoRouter] urldl not available, trying fallback")
             await message.reply_text(
-                "❌ **URL downloader লোড হয়নি!**",
+                f"🔗 **URL Downloader লোড হয়নি।**\n\n"
+                f"Manual: `/urldl {url[:60]}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            LOGGER.error(f"[AutoRouter] urldl error: {e}")
+            await message.reply_text(
+                f"❌ **Error:** `{str(e)[:150]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -407,7 +549,7 @@ async def _auto_detect_handler(client: Client, message: Message):
     if message.text.strip().startswith(tuple(COMMAND_PREFIX)):
         return
 
-    # Telegram লিংক → autolink.py-তে ছেড়ে দাও
+    # Telegram লিংক → autolink.py-তে ছেড়ে দাও (group=1 handle করবে)
     if TELEGRAM_LINK_PATTERN.search(message.text):
         return
 
@@ -420,30 +562,58 @@ async def _auto_detect_handler(client: Client, message: Message):
         ):
             return
 
-    # URL খোঁজা
-    match = GENERIC_URL_PATTERN.search(message.text)
-    if not match:
-        # Magnet লিংক আলাদাভাবে চেক
-        text = message.text.strip()
-        if not MAGNET_PATTERN.match(text):
+    # settings conversation চেক
+    try:
+        from plugins.settings import _conv
+        if message.from_user and message.from_user.id in _conv:
             return
+    except Exception:
+        pass
+
+    # login conversation চেক
+    try:
+        from plugins.login import session_data
+        if message.chat.id in session_data:
+            return
+    except Exception:
+        pass
+
+    # gdl pending url চেক
+    try:
+        from plugins.gdl import _pending_url_requests
+        user_id_check = message.from_user.id if message.from_user else -1
+        if (message.chat.id, user_id_check) in _pending_url_requests:
+            return
+    except Exception:
+        pass
+
+    # URL খোঁজা
+    url = None
+    text = message.text.strip()
+
+    # Magnet লিংক আলাদাভাবে চেক
+    if MAGNET_PATTERN.match(text):
         url = text
     else:
-        url = match.group(0).strip().rstrip(".,;!?)")
+        match = GENERIC_URL_PATTERN.search(text)
+        if match:
+            url = match.group(0).strip().rstrip(".,;!?)")
+
+    if not url:
+        return
 
     # Route নির্ধারণ
     route = detect_route(url)
 
-    # Skip করার route
-    if route in ("telegram", "unknown"):
+    LOGGER.info(f"[AutoRouter] Detected: route={route} url={url[:60]}")
+
+    # Telegram লিংক skip — autolink.py handle করবে
+    if route == "telegram":
         return
 
-    # urldl → urldl.py নিজেই group=2 তে handle করে, skip
-    # তবে যদি urldl.py না থাকে তাহলে এখানে handle করব
-    if route == "urldl":
-        _urldl = sys.modules.get("plugins.urldl")
-        if _urldl:
-            return  # urldl.py ই handle করবে
+    # Unknown skip
+    if route == "unknown":
+        return
 
     user_id = message.from_user.id if message.from_user else 0
 
@@ -452,9 +622,12 @@ async def _auto_detect_handler(client: Client, message: Message):
         if not await check_force_sub(client, user_id):
             return
 
-    info = ROUTE_INFO.get(route, {})
+    # urldl route — এখন auto_router নিজেই handle করবে
+    # (আগে group=2 এ urldl.py handle করত, কিন্তু সেখানে pending/rename UI ছিল)
+    # auto_router সরাসরি download শুরু করবে কোনো UI ছাড়াই
+
     LOGGER.info(
-        f"[AutoRouter] Auto-detected route={route} "
+        f"[AutoRouter] Executing route={route} "
         f"url={url[:60]} user={user_id}"
     )
 
@@ -561,10 +734,10 @@ def setup_auto_router(app: Client):
 
     Handler groups:
       group=1  → autolink.py (Telegram লিংক)
-      group=2  → urldl.py (generic HTTP auto-detect)
-      group=3  → এই ফাইলের auto-detect (gdrive, ytdlp, directdl, aria2)
+      group=2  → urldl.py (generic HTTP auto-detect with UI)
+      group=3  → এই ফাইলের auto-detect (gdrive, ytdlp, directdl, aria2, urldl)
     """
-    from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+    from pyrogram.handlers import MessageHandler
 
     # /route command
     app.add_handler(
@@ -591,6 +764,11 @@ def setup_auto_router(app: Client):
 
     # ── মূল অটো-ডিটেক্ট হ্যান্ডলার ────────────────────────────
     # URL paste করলেই কাজ করবে — কোনো command লাগবে না
+    # group=3 তে রাখা হয়েছে যাতে:
+    #   - autolink.py (group=1) আগে Telegram লিংক handle করে
+    #   - urldl.py (group=2) আগে generic URL handle করে (UI সহ)
+    #   - এই handler বাকি সব handle করে (gdrive, ytdlp, directdl, aria2)
+    #   - BUT urldl route-ও এখানে handle হবে যদি urldl.py skip করে
     app.add_handler(
         MessageHandler(
             _auto_detect_handler,
@@ -603,5 +781,6 @@ def setup_auto_router(app: Client):
         "[AutoRouter] ✅ Registered:\n"
         "  • /route command\n"
         "  • /plugininfo command\n"
-        "  • Auto URL detection (group=3) — কোনো command ছাড়াই কাজ করবে"
+        "  • Auto URL detection (group=3) — কোনো command ছাড়াই কাজ করবে\n"
+        "  • Supports: gdrive, ytdlp, directdl, aria2, urldl"
     )
