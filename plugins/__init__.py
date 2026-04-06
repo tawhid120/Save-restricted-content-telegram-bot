@@ -32,4 +32,3 @@ def setup_plugins_handlers(app):
     setup_settings_handler(app)
     setup_autolink_handler(app)   # group=1 — Telegram লিংক handle করে
     setup_referral_handler(app)
-ে
