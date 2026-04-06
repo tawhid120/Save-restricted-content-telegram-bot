@@ -1,27 +1,28 @@
 # Copyright @juktijol
 # Channel t.me/juktijol
 #
-# plugins/auto_router.py — Unified Auto-Link & Command Router
+# plugins/auto_router.py — Fully Automatic Link Router (No Command Required)
 #
-# এই ফাইলটি সব ধরনের লিংক ও কমান্ড অটোমেটিক ডিটেক্ট করে
-# সঠিক plugin-এ পাঠায়। Telegram লিংক সবসময় autolink.py-তে যাবে।
+# URL paste করলেই অটোমেটিক সঠিক downloader-এ পাঠাবে
+# কোনো confirm button বা command দরকার নেই
 #
 # ═══════════════════════════════════════════════════════════════════
 # ROUTING TABLE:
 # ───────────────────────────────────────────────────────────────────
 # t.me / telegram.me লিংক  → autolink.py   (কোনো conflict নেই)
-# drive.google.com          → gdl.py        (/gdl)
-# mediafire, gofile, etc.   → directdl.py   (/ddl)
-# youtube, vimeo, 1000+ sites → ytdl.py    (/ytdl)
-# magnet: / .torrent        → aria2dl.py    (/dl)
-# Direct HTTP file URL      → urldl.py      (auto)
+# drive.google.com          → gdl.py        (অটো)
+# mediafire, gofile, etc.   → directdl.py   (অটো)
+# youtube, vimeo, 1000+ sites → ytdl.py    (অটো)
+# magnet: / .torrent        → aria2dl.py    (অটো)
+# Direct HTTP file URL      → urldl.py      (অটো)
 # ═══════════════════════════════════════════════════════════════════
 
 import re
 import asyncio
+import sys
 from urllib.parse import urlparse
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from pyrogram.enums import ParseMode, ChatType
 
 from config import COMMAND_PREFIX
@@ -32,7 +33,7 @@ from utils.force_sub import check_force_sub
 # PATTERN DEFINITIONS
 # ─────────────────────────────────────────────────────────────────
 
-# Telegram লিংক — এগুলো autolink.py handle করবে, এখানে ছোঁয়া হবে না
+# Telegram লিংক — autolink.py handle করবে
 TELEGRAM_LINK_PATTERN = re.compile(
     r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?([a-zA-Z0-9_]+|\d+)/(\d+)(?:/\d+)?"
 )
@@ -47,7 +48,16 @@ GDRIVE_PATTERN = re.compile(
 MAGNET_PATTERN = re.compile(r"^magnet:\?xt=", re.IGNORECASE)
 TORRENT_PATTERN = re.compile(r"\.torrent(\?.*)?$", re.IGNORECASE)
 
-# yt-dlp সাপোর্টেড সাইটের pattern (প্রধান সাইটগুলো)
+# HLS / m3u8 stream
+HLS_PATTERN = re.compile(r"\.m3u8(\?.*)?$", re.IGNORECASE)
+
+# Generic URL pattern
+GENERIC_URL_PATTERN = re.compile(
+    r"https?://[^\s<>\"{}|\\^`\[\]]+",
+    re.IGNORECASE,
+)
+
+# yt-dlp সাপোর্টেড সাইটের domain list
 YTDLP_DOMAINS = {
     "youtube.com", "youtu.be", "www.youtube.com",
     "m.youtube.com", "music.youtube.com",
@@ -76,10 +86,7 @@ YTDLP_DOMAINS = {
     "naver.com", "daum.net",
 }
 
-# HLS / m3u8 stream
-HLS_PATTERN = re.compile(r"\.m3u8(\?.*)?$", re.IGNORECASE)
-
-# directdl.py সাপোর্টেড সাইটগুলো (utils/direct_links.py থেকে)
+# directdl.py সাপোর্টেড সাইটগুলো
 DIRECTDL_DOMAINS = {
     "mediafire.com", "gofile.io", "pixeldrain.com", "pixeldra.in",
     "1fichier.com", "streamtape.com", "wetransfer.com", "we.tl",
@@ -129,7 +136,6 @@ def _is_magnet_or_torrent(url: str) -> bool:
 
 def _is_ytdlp_site(url: str) -> bool:
     domain = _get_domain(url)
-    # subdomain check
     for yd in YTDLP_DOMAINS:
         if domain == yd or domain.endswith(f".{yd}"):
             return True
@@ -139,7 +145,7 @@ def _is_ytdlp_site(url: str) -> bool:
 def _is_directdl_site(url: str) -> bool:
     domain = _get_domain(url)
     for dd in DIRECTDL_DOMAINS:
-        if domain == yd or domain.endswith(f".{dd}") or dd in domain:
+        if domain == dd or domain.endswith(f".{dd}") or dd in domain:
             return True
     return False
 
@@ -149,11 +155,10 @@ def _is_hls_stream(url: str) -> bool:
 
 
 def _is_direct_http_file(url: str) -> bool:
-    """সরাসরি HTTP ফাইল লিংক — কোনো বিশেষ সাইট নয়"""
+    """সরাসরি HTTP ফাইল লিংক"""
     if not url.startswith(("http://", "https://")):
         return False
     domain = _get_domain(url)
-    # Telegram, Google Drive, ytdlp, directdl — এসব ছাড়া বাকি HTTP লিংক
     if "t.me" in domain or "telegram.me" in domain:
         return False
     if _is_gdrive_link(url):
@@ -163,19 +168,18 @@ def _is_direct_http_file(url: str) -> bool:
 
 def detect_route(url: str) -> str:
     """
-    URL দেখে সঠিক route নির্ধারণ করে।
+    URL দেখে সঠিক route নির্ধারণ।
 
     Returns:
-        "telegram"  → autolink.py (Telegram লিংক)
+        "telegram"  → autolink.py
         "gdrive"    → gdl.py
-        "aria2"     → aria2dl.py (magnet/torrent)
+        "aria2"     → aria2dl.py
         "ytdlp"     → ytdl.py
         "directdl"  → directdl.py
-        "urldl"     → urldl.py (generic HTTP)
+        "urldl"     → urldl.py
         "unknown"   → অজানা
     """
     url = url.strip()
-
     if not url:
         return "unknown"
 
@@ -191,7 +195,7 @@ def detect_route(url: str) -> str:
     if _is_magnet_or_torrent(url):
         return "aria2"
 
-    # 4. HLS stream — yt-dlp দিয়ে চেষ্টা করা হবে
+    # 4. HLS stream
     if _is_hls_stream(url):
         return "ytdlp"
 
@@ -200,12 +204,10 @@ def detect_route(url: str) -> str:
         return "ytdlp"
 
     # 6. Known directdl সাইট
-    domain = _get_domain(url)
-    for dd in DIRECTDL_DOMAINS:
-        if dd in domain:
-            return "directdl"
+    if _is_directdl_site(url):
+        return "directdl"
 
-    # 7. Generic HTTP ফাইল লিংক
+    # 7. Generic HTTP ফাইল
     if _is_direct_http_file(url):
         return "urldl"
 
@@ -213,164 +215,110 @@ def detect_route(url: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# ROUTE LABELS (UI display)
+# ROUTE LABELS (logging ও status message এর জন্য)
 # ─────────────────────────────────────────────────────────────────
 
 ROUTE_INFO = {
     "telegram": {
         "icon": "📨",
         "label": "Telegram Link",
-        "hint": "autolink detection এ handled হবে",
-        "command": None,
+        "hint": "autolink দিয়ে handle হবে",
     },
     "gdrive": {
         "icon": "☁️",
         "label": "Google Drive",
-        "hint": "Google Drive থেকে download করবে",
-        "command": "gdl",
+        "hint": "Google Drive থেকে download করছে...",
     },
     "aria2": {
         "icon": "🌊",
         "label": "Torrent / Magnet",
-        "hint": "Aria2c দিয়ে download করবে",
-        "command": "dl",
+        "hint": "Aria2c দিয়ে download করছে...",
     },
     "ytdlp": {
         "icon": "🎬",
         "label": "Video Site (yt-dlp)",
-        "hint": "yt-dlp দিয়ে download করবে",
-        "command": "ytdl",
+        "hint": "yt-dlp দিয়ে download করছে...",
     },
     "directdl": {
         "icon": "📦",
         "label": "File Hosting Site",
-        "hint": "Direct link generator দিয়ে download করবে",
-        "command": "ddl",
+        "hint": "Direct link generate করছে...",
     },
     "urldl": {
         "icon": "🔗",
         "label": "Direct URL",
-        "hint": "সরাসরি HTTP download করবে",
-        "command": "urldl",
+        "hint": "HTTP download করছে...",
     },
 }
 
 
 # ─────────────────────────────────────────────────────────────────
-# INLINE KEYBOARDS
-# ─────────────────────────────────────────────────────────────────
-
-def _route_confirm_keyboard(route: str, url_short: str) -> InlineKeyboardMarkup:
-    info = ROUTE_INFO.get(route, {})
-    icon = info.get("icon", "🔗")
-    label = info.get("label", route)
-    cmd = info.get("command")
-
-    buttons = []
-    if cmd:
-        buttons.append([
-            InlineKeyboardButton(
-                f"{icon} Download ({label})",
-                callback_data=f"autoroute_go_{route}",
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton("❌ Cancel", callback_data="autoroute_cancel"),
-    ])
-    return InlineKeyboardMarkup(buttons)
-
-
-def _multi_route_keyboard(routes: list) -> InlineKeyboardMarkup:
-    """একাধিক route option দেখানোর জন্য"""
-    buttons = []
-    for route in routes:
-        info = ROUTE_INFO.get(route, {})
-        icon = info.get("icon", "🔗")
-        label = info.get("label", route)
-        buttons.append([
-            InlineKeyboardButton(
-                f"{icon} {label}",
-                callback_data=f"autoroute_go_{route}",
-            )
-        ])
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="autoroute_cancel")])
-    return InlineKeyboardMarkup(buttons)
-
-
-# ─────────────────────────────────────────────────────────────────
-# SESSION STORE: pending route confirmations
-# ─────────────────────────────────────────────────────────────────
-
-_pending_routes: dict = {}  # chat_id → { url, route, user_id }
-
-
-# ─────────────────────────────────────────────────────────────────
-# ROUTE EXECUTOR — সঠিক handler-এ forward করে
+# ROUTE EXECUTOR — সঠিক handler-এ সরাসরি forward করে
 # ─────────────────────────────────────────────────────────────────
 
 async def _execute_route(client: Client, message: Message, url: str, route: str):
-    """নির্ধারিত route অনুযায়ী download শুরু করে।"""
+    """নির্ধারিত route অনুযায়ী সরাসরি download শুরু করে।"""
     user_id = message.from_user.id if message.from_user else message.chat.id
+    info = ROUTE_INFO.get(route, {})
 
-    LOGGER.info(f"[AutoRouter] Executing route={route} url={url[:60]} user={user_id}")
+    LOGGER.info(
+        f"[AutoRouter] route={route} url={url[:60]} user={user_id}"
+    )
 
-    if route == "telegram":
-        # autolink.py নিজেই handle করে — এখানে কিছু করার নেই
-        # তবু confirm করা হয়েছে, তাই user-কে জানাই
-        await message.reply_text(
-            "ℹ️ **Telegram লিংক ডিটেক্ট হয়েছে।**\n\n"
-            "লিংকটি সরাসরি chat-এ paste করুন — বট অটোমেটিক download করবে।",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-    elif route == "gdrive":
-        # gdl.py → _process_gdl()
+    # ── Google Drive ──────────────────────────────────────────────
+    if route == "gdrive":
         try:
             from plugins.gdl import _process_gdl
             await _process_gdl(client, message, url)
         except ImportError:
             await message.reply_text(
-                "❌ **Google Drive downloader লোড হয়নি!**\n"
-                "Admin-কে জানান।",
+                "❌ **Google Drive downloader লোড হয়নি!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
+    # ── Torrent / Magnet ──────────────────────────────────────────
     elif route == "aria2":
-        # aria2dl.py → /dl command handler simulate
         try:
             import shutil
             if not shutil.which("aria2c"):
                 await message.reply_text(
                     "❌ **aria2c ইনস্টল নেই!**\n"
-                    "Admin: `sudo apt install aria2`",
+                    "`sudo apt install aria2`",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 return
-            # aria2dl handler-কে simulate করতে fake command text set
-            message.text = f"/dl {url}"
-            message.command = ["dl", url]
-            from plugins.aria2dl import _run_download, _cancel_events
-            import asyncio
+
+            from plugins.aria2dl import (
+                _run_download,
+                _cancel_events,
+                _is_premium,
+            )
+
             status_msg = await message.reply_text(
-                "🔄 **Torrent/Magnet download শুরু হচ্ছে...**",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            cancel_event = asyncio.Event()
-            _cancel_events[status_msg.id] = cancel_event
-            from plugins.aria2dl import _is_premium, _check_and_set_cooldown
-            is_prem = await _is_premium(user_id)
-            asyncio.create_task(
-                _run_download(client, message, url, None, status_msg, is_prem, cancel_event)
-            )
-        except ImportError:
-            await message.reply_text(
-                "❌ **Aria2 downloader লোড হয়নি!**\n"
-                "Admin-কে জানান।",
+                f"🌊 **Torrent/Magnet download শুরু হচ্ছে...**\n\n"
+                f"`{url[:80]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
+            cancel_event = asyncio.Event()
+            _cancel_events[status_msg.id] = cancel_event
+            is_prem = await _is_premium(user_id)
+
+            asyncio.create_task(
+                _run_download(
+                    client, message, url, None,
+                    status_msg, is_prem, cancel_event,
+                )
+            )
+
+        except ImportError:
+            await message.reply_text(
+                "❌ **Aria2 downloader লোড হয়নি!**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+    # ── yt-dlp ───────────────────────────────────────────────────
     elif route == "ytdlp":
-        # ytdl.py → _handle_single_video_initiate()
         try:
             from plugins.ytdl import (
                 _handle_single_video_initiate_public,
@@ -378,66 +326,148 @@ async def _execute_route(client: Client, message: Message, url: str, route: str)
                 _check_rate_limit,
                 parse_url_and_referer,
             )
+
             url_clean, referer = parse_url_and_referer(url)
             is_prem = await is_premium_user(user_id)
             allowed, rate_msg = await _check_rate_limit(user_id, is_prem)
+
             if not allowed:
-                await message.reply_text(rate_msg, parse_mode=ParseMode.MARKDOWN)
+                await message.reply_text(
+                    rate_msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 return
+
             await _handle_single_video_initiate_public(
                 client, message, url_clean, user_id, is_prem, referer
             )
+
         except (ImportError, AttributeError):
-            # fallback: /ytdl command simulate
+            # Fallback: manual command hint
             await message.reply_text(
-                f"🎬 **yt-dlp দিয়ে download করতে:**\n\n"
-                f"`/ytdl {url}`",
+                f"🎬 **yt-dlp downloader লোড হয়নি।**\n\n"
+                f"Manual: `/ytdl {url[:60]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
+    # ── Direct Download Sites ─────────────────────────────────────
     elif route == "directdl":
-        # directdl.py → _process_ddl()
         try:
             from plugins.directdl import _process_ddl
+
             status_msg = await message.reply_text(
-                "🔄 **Processing...**",
+                f"📦 **Direct link generate করছে...**\n\n"
+                f"`{url[:80]}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            asyncio.create_task(_process_ddl(client, message, url, status_msg))
+
+            asyncio.create_task(
+                _process_ddl(client, message, url, status_msg)
+            )
+
         except ImportError:
             await message.reply_text(
-                f"📦 **File hosting site ডিটেক্ট হয়েছে।**\n\n"
-                f"Download করতে:\n`/ddl {url}`",
+                "❌ **DirectDL downloader লোড হয়নি!**",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
+    # ── Generic HTTP URL ──────────────────────────────────────────
     elif route == "urldl":
-        # urldl.py → auto detection already covers this
-        # just provide a command hint
-        await message.reply_text(
-            f"🔗 **Direct URL ডিটেক্ট হয়েছে।**\n\n"
-            f"Download করতে:\n`/urldl {url}`\n\n"
-            f"অথবা URL টি সরাসরি paste করুন।",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        try:
+            from plugins.urldl import _process_url_download
 
+            await _process_url_download(client, message, url)
+
+        except ImportError:
+            await message.reply_text(
+                "❌ **URL downloader লোড হয়নি!**",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+    # ── Unknown ───────────────────────────────────────────────────
     else:
-        await message.reply_text(
-            f"❓ **এই লিংকের জন্য কোনো handler পাওয়া যায়নি।**\n\n"
-            f"URL: `{url[:100]}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        LOGGER.warning(f"[AutoRouter] Unknown route for URL: {url[:80]}")
 
 
 # ─────────────────────────────────────────────────────────────────
-# /route COMMAND — যেকোনো লিংক দিলে route বলে দেবে
+# MAIN AUTO-DETECT HANDLER
+# URL paste করলেই অটো কাজ করবে — কোনো command লাগবে না
+# group=3 — autolink (group=1) ও urldl (group=2) এর পরে
+# ─────────────────────────────────────────────────────────────────
+
+async def _auto_detect_handler(client: Client, message: Message):
+    """
+    যেকোনো URL paste করলে অটোমেটিক সঠিক downloader-এ পাঠাবে।
+    কোনো command বা confirm button ছাড়াই কাজ করবে।
+    """
+    if not message.text:
+        return
+
+    # Command message skip
+    if message.text.strip().startswith(tuple(COMMAND_PREFIX)):
+        return
+
+    # Telegram লিংক → autolink.py-তে ছেড়ে দাও
+    if TELEGRAM_LINK_PATTERN.search(message.text):
+        return
+
+    # pbatch session চেক — batch চলাকালীন interfere করবে না
+    _pbatch = sys.modules.get("plugins.pbatch")
+    if _pbatch:
+        state = _pbatch.batch_data.get(message.chat.id)
+        if state and state.get("user_id") == (
+            message.from_user.id if message.from_user else -1
+        ):
+            return
+
+    # URL খোঁজা
+    match = GENERIC_URL_PATTERN.search(message.text)
+    if not match:
+        # Magnet লিংক আলাদাভাবে চেক
+        text = message.text.strip()
+        if not MAGNET_PATTERN.match(text):
+            return
+        url = text
+    else:
+        url = match.group(0).strip().rstrip(".,;!?)")
+
+    # Route নির্ধারণ
+    route = detect_route(url)
+
+    # Skip করার route
+    if route in ("telegram", "unknown"):
+        return
+
+    # urldl → urldl.py নিজেই group=2 তে handle করে, skip
+    # তবে যদি urldl.py না থাকে তাহলে এখানে handle করব
+    if route == "urldl":
+        _urldl = sys.modules.get("plugins.urldl")
+        if _urldl:
+            return  # urldl.py ই handle করবে
+
+    user_id = message.from_user.id if message.from_user else 0
+
+    # Force sub check (শুধু private chat-এ)
+    if message.chat.type == ChatType.PRIVATE and message.from_user:
+        if not await check_force_sub(client, user_id):
+            return
+
+    info = ROUTE_INFO.get(route, {})
+    LOGGER.info(
+        f"[AutoRouter] Auto-detected route={route} "
+        f"url={url[:60]} user={user_id}"
+    )
+
+    # সরাসরি execute — কোনো confirm ছাড়া
+    await _execute_route(client, message, url, route)
+
+
+# ─────────────────────────────────────────────────────────────────
+# /route COMMAND — লিংক বিশ্লেষণ করে দেখাবে
 # ─────────────────────────────────────────────────────────────────
 
 async def _route_command_handler(client: Client, message: Message):
-    """
-    /route <URL>
-    যেকোনো লিংক দিলে কোন downloader ব্যবহার করা হবে তা দেখাবে।
-    """
+    """/route <URL> — কোন downloader ব্যবহার হবে দেখাবে"""
     parts = message.text.split(None, 1)
     if len(parts) < 2:
         await message.reply_text(
@@ -455,225 +485,24 @@ async def _route_command_handler(client: Client, message: Message):
 
     url = parts[1].strip()
     route = detect_route(url)
-    info = ROUTE_INFO.get(route, {"icon": "❓", "label": "Unknown", "hint": "N/A", "command": None})
-
-    cmd_line = f"`/{info['command']} {url[:60]}`" if info.get("command") else "_(autolink ডিটেক্ট করবে)_"
+    info = ROUTE_INFO.get(
+        route,
+        {"icon": "❓", "label": "Unknown", "hint": "অজানা"},
+    )
 
     await message.reply_text(
         f"**🗺 Link Analysis**\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"🔗 **URL:** `{url[:80]}`\n\n"
         f"{info['icon']} **Route:** `{info['label']}`\n"
-        f"ℹ️ **Info:** {info['hint']}\n\n"
-        f"**▶️ Command:**\n{cmd_line}",
+        f"ℹ️ **Info:** {info['hint']}",
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
     )
 
 
 # ─────────────────────────────────────────────────────────────────
-# /autoroute COMMAND — লিংক দিলে অটো detect করে download শুরু করবে
-# ─────────────────────────────────────────────────────────────────
-
-async def _autoroute_command_handler(client: Client, message: Message):
-    """
-    /autoroute <URL>
-    লিংক ডিটেক্ট করে সঠিক downloader-এ পাঠায়।
-    Telegram লিংক autolink.py-তে থাকে।
-    """
-    parts = message.text.split(None, 1)
-    if len(parts) < 2:
-        await message.reply_text(
-            "**🚀 Auto Router**\n\n"
-            "**Usage:** `/autoroute <URL>`\n\n"
-            "লিংক দিলে বট অটোমেটিক সঠিক downloader বেছে নেবে।\n\n"
-            "**Supported:**\n"
-            "• 📨 Telegram লিংক → autolink\n"
-            "• ☁️ Google Drive → `/gdl`\n"
-            "• 🌊 Magnet/Torrent → `/dl`\n"
-            "• 🎬 YouTube/1000+ sites → `/ytdl`\n"
-            "• 📦 MediaFire, GoFile, etc → `/ddl`\n"
-            "• 🔗 Direct HTTP file → `/urldl`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    url = parts[1].strip()
-    route = detect_route(url)
-    info = ROUTE_INFO.get(route, {"icon": "❓", "label": "Unknown", "hint": "N/A", "command": None})
-
-    # Telegram লিংক হলে user-কে guide করি কিন্তু autolink conflict করি না
-    if route == "telegram":
-        await message.reply_text(
-            "📨 **Telegram লিংক ডিটেক্ট হয়েছে!**\n\n"
-            "এই লিংকটি সরাসরি chat-এ paste করুন —\n"
-            "বট অটোমেটিক download করবে। ✅",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    # Unknown route
-    if route == "unknown" or not info.get("command"):
-        await message.reply_text(
-            f"❓ **এই লিংকের জন্য কোনো handler পাওয়া যায়নি।**\n\n"
-            f"URL: `{url[:100]}`\n\n"
-            f"সরাসরি paste করলে বট চেষ্টা করবে।",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    # Confirm screen
-    url_short = url[:70] + ("..." if len(url) > 70 else "")
-    user_id = message.from_user.id
-
-    _pending_routes[message.chat.id] = {
-        "url": url,
-        "route": route,
-        "user_id": user_id,
-    }
-
-    await message.reply_text(
-        f"**🚀 Link Detected!**\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"{info['icon']} **Type:** `{info['label']}`\n"
-        f"ℹ️ **Action:** {info['hint']}\n\n"
-        f"🔗 `{url_short}`\n\n"
-        f"**Download শুরু করবেন?**",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_route_confirm_keyboard(route, url_short),
-        disable_web_page_preview=True,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────
-# CALLBACK: autoroute_go_ / autoroute_cancel
-# ─────────────────────────────────────────────────────────────────
-
-async def _autoroute_callback(client: Client, callback_query):
-    data = callback_query.data
-    chat_id = callback_query.message.chat.id
-    user_id = callback_query.from_user.id
-
-    if data == "autoroute_cancel":
-        _pending_routes.pop(chat_id, None)
-        try:
-            await callback_query.message.delete()
-        except Exception:
-            pass
-        await callback_query.answer("❌ Cancelled.")
-        return
-
-    if data.startswith("autoroute_go_"):
-        route = data[len("autoroute_go_"):]
-        pending = _pending_routes.get(chat_id)
-
-        if not pending or pending.get("user_id") != user_id:
-            await callback_query.answer("❌ Session expired!", show_alert=True)
-            return
-
-        url = pending["url"]
-        _pending_routes.pop(chat_id, None)
-
-        try:
-            await callback_query.message.delete()
-        except Exception:
-            pass
-
-        await callback_query.answer(f"⏳ Starting {route}...")
-
-        # message object তৈরি করা কঠিন, তাই reply পাঠাই
-        new_msg = await client.send_message(
-            chat_id=chat_id,
-            text=f"⏳ **Processing...**",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        # message.from_user set করা যাবে না, তাই sender simulate করি
-        new_msg.from_user = callback_query.from_user
-        await _execute_route(client, new_msg, url, route)
-
-
-# ─────────────────────────────────────────────────────────────────
-# TEXT-based auto detection (group=3 — pbatch ও autolink এর পরে)
-# ─────────────────────────────────────────────────────────────────
-# শুধুমাত্র non-Telegram, non-command URL-এর জন্য।
-# Telegram লিংক autolink.py (group=1) আগেই handle করে।
-# ─────────────────────────────────────────────────────────────────
-
-GENERIC_URL_PATTERN = re.compile(
-    r"https?://[^\s<>\"{}|\\^`\[\]]+",
-    re.IGNORECASE,
-)
-
-
-async def _auto_detect_handler(client: Client, message: Message):
-    """
-    group=3 — Telegram লিংক বাদ দিয়ে অন্য URL auto-detect করে।
-    """
-    if not message.text:
-        return
-    if message.text.strip().startswith(tuple(COMMAND_PREFIX)):
-        return
-
-    # Telegram লিংক থাকলে autolink.py-এর উপর ছেড়ে দাও (এখানে handle করি না)
-    if TELEGRAM_LINK_PATTERN.search(message.text):
-        return
-
-    # pbatch session চেক
-    import sys
-    _pbatch = sys.modules.get("plugins.pbatch")
-    if _pbatch:
-        state = _pbatch.batch_data.get(message.chat.id)
-        if state and state.get("user_id") == (
-            message.from_user.id if message.from_user else -1
-        ):
-            return
-
-    # URL খোঁজা
-    match = GENERIC_URL_PATTERN.search(message.text)
-    if not match:
-        return
-
-    url = match.group(0).strip().rstrip(".,;!?)")
-    route = detect_route(url)
-
-    # Telegram ও unknown route skip
-    if route in ("telegram", "unknown", "urldl"):
-        return  # urldl.py নিজেই group=2 তে handle করে
-
-    # Google Drive, magnet, ytdlp, directdl — hint দিই
-    info = ROUTE_INFO.get(route, {})
-    cmd = info.get("command")
-    if not cmd:
-        return
-
-    user_id = message.from_user.id if message.from_user else 0
-
-    # Force sub check
-    if message.chat.type == ChatType.PRIVATE and message.from_user:
-        if not await check_force_sub(client, user_id):
-            return
-
-    url_short = url[:60] + ("..." if len(url) > 60 else "")
-
-    _pending_routes[message.chat.id] = {
-        "url": url,
-        "route": route,
-        "user_id": user_id,
-    }
-
-    await message.reply_text(
-        f"{info.get('icon', '🔗')} **{info.get('label', route)} ডিটেক্ট হয়েছে!**\n\n"
-        f"`{url_short}`\n\n"
-        f"**{info.get('hint', '')}**\n\n"
-        f"Download করবেন?",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_route_confirm_keyboard(route, url_short),
-        disable_web_page_preview=True,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────
-# HANDLER INFO COMMAND — সব plugin-এর কমান্ড তালিকা দেখাবে
+# /plugininfo COMMAND — সব কমান্ডের তালিকা
 # ─────────────────────────────────────────────────────────────────
 
 PLUGIN_COMMAND_INFO = """
@@ -681,38 +510,36 @@ PLUGIN_COMMAND_INFO = """
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 **📨 Telegram Content:**
-• _(Telegram লিংক সরাসরি paste করুন)_
-• `/batch` — Batch download (Premium)
+• লিংক সরাসরি paste করুন — অটো download হবে
 
 **🎬 Video Downloader (yt-dlp):**
-• `/ytdl <URL>` — YouTube, TikTok, Instagram, 1000+ সাইট
-• `/ytdl <URL> referer:<site>` — Protected HLS/m3u8 stream
+• লিংক paste করুন — অটো download হবে
+• `/ytdl <URL>` — Manual command
 
 **☁️ Google Drive:**
-• `/gdl <URL>` — Google Drive file/folder download
-• `/gdl` — সরাসরি command দিয়ে URL ask করবে
+• লিংক paste করুন — অটো download হবে
+• `/gdl <URL>` — Manual command
 
 **📦 File Hosting Sites:**
-• `/ddl <URL>` — MediaFire, GoFile, Pixeldrain, 1Fichier, etc.
-• _(40+ সাইট supported)_
+• লিংক paste করুন — অটো download হবে
+• `/ddl <URL>` — Manual command
 
 **🌊 Torrent / Magnet:**
-• `/dl <magnet>` — Magnet link download
-• `/dl <torrent URL>` — Torrent file download
-• `/mirror <same>` — Alias
+• Magnet/torrent link paste করুন — অটো download হবে
+• `/dl <magnet>` — Manual command
 
 **🔗 Direct URL:**
-• `/urldl <URL>` — যেকোনো direct HTTP file download
-• _(URL সরাসরি paste করলেও কাজ করে)_
+• HTTP লিংক paste করুন — অটো download হবে
+• `/urldl <URL>` — Manual command
 
 **📺 YouTube Upload:**
 • `/ytconnect` — YouTube channel connect
 • `/ytupload <URL>` — Video upload to YouTube
-• `/ytsend` — Telegram video → YouTube
 
 **🗺 Router Tools:**
 • `/route <URL>` — কোন downloader হবে দেখাবে
-• `/autoroute <URL>` — অটো detect করে download করবে
+
+> 💡 **সব ধরনের লিংক সরাসরি paste করলেই অটো কাজ করবে!**
 """
 
 
@@ -733,9 +560,9 @@ def setup_auto_router(app: Client):
     Auto Router handlers register করে।
 
     Handler groups:
-      group=1  → autolink.py (Telegram লিংক) — conflict নেই
-      group=2  → urldl.py (generic URL auto-detect)
-      group=3  → এই ফাইলের auto-detect (non-Telegram, non-urldl)
+      group=1  → autolink.py (Telegram লিংক)
+      group=2  → urldl.py (generic HTTP auto-detect)
+      group=3  → এই ফাইলের auto-detect (gdrive, ytdlp, directdl, aria2)
     """
     from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 
@@ -749,36 +576,21 @@ def setup_auto_router(app: Client):
         group=1,
     )
 
-    # /autoroute command
-    app.add_handler(
-        MessageHandler(
-            _autoroute_command_handler,
-            filters=filters.command("autoroute", prefixes=COMMAND_PREFIX)
-            & (filters.private | filters.group),
-        ),
-        group=1,
-    )
-
     # /plugininfo command
     app.add_handler(
         MessageHandler(
             _plugininfo_command_handler,
-            filters=filters.command(["plugininfo", "commands", "allcmds"], prefixes=COMMAND_PREFIX)
+            filters=filters.command(
+                ["plugininfo", "commands", "allcmds"],
+                prefixes=COMMAND_PREFIX,
+            )
             & (filters.private | filters.group),
         ),
         group=1,
     )
 
-    # Callback: autoroute_go_ / autoroute_cancel
-    app.add_handler(
-        CallbackQueryHandler(
-            _autoroute_callback,
-            filters=filters.regex(r"^autoroute_(go_.+|cancel)$"),
-        ),
-        group=1,
-    )
-
-    # Auto URL detection (group=3 — Telegram লিংক বাদ দিয়ে)
+    # ── মূল অটো-ডিটেক্ট হ্যান্ডলার ────────────────────────────
+    # URL paste করলেই কাজ করবে — কোনো command লাগবে না
     app.add_handler(
         MessageHandler(
             _auto_detect_handler,
@@ -788,6 +600,8 @@ def setup_auto_router(app: Client):
     )
 
     LOGGER.info(
-        "[AutoRouter] Registered: /route, /autoroute, /plugininfo, "
-        "auto URL detection (group=3) ✅"
+        "[AutoRouter] ✅ Registered:\n"
+        "  • /route command\n"
+        "  • /plugininfo command\n"
+        "  • Auto URL detection (group=3) — কোনো command ছাড়াই কাজ করবে"
     )
