@@ -378,7 +378,6 @@ def _buzzheavier(url: str) -> str | dict:
                 dl_url = _fetch(f"https://buzzheavier.com{href}", folder=True)
                 if dl_url:
                     details["contents"].append({"path": "", "filename": filename, "url": dl_url})
-                    # rough size conversion
                     for unit, factor in [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1024)]:
                         if unit in size_txt:
                             details["total_size"] += float(size_txt.replace(unit, "").strip()) * factor
@@ -793,113 +792,532 @@ def _mediafile(url: str) -> str:
         raise DirectLinkException(f"MediaFile: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MEDIAFIRE — File + Folder handler  (v3 — multi-fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mf_resolve_indirect(href: str, pwd: str | None, session) -> str:
+    """
+    Some MediaFire buttons point to an intermediate /file/ page instead of a
+    direct CDN URL. This helper follows one such hop if needed.
+
+    - If href is already a CDN URL    → return as-is
+    - If href is another /file/ page  → re-scrape it (one level deep only)
+    - If href starts with '//'        → prepend https:
+    """
+    if not href:
+        return href
+
+    # Fix protocol-relative URLs
+    if href.startswith("//"):
+        href = f"https:{href}"
+
+    # Already a CDN direct link → return immediately
+    if search(r"download\d*\.mediafire\.com", href):
+        return href
+
+    # Another mediafire.com/file/ page — follow it once (one hop only)
+    if "mediafire.com/file/" in href:
+        try:
+            from lxml.etree import HTML as lhtml
+            res       = session.get(href, timeout=20)
+            html_tree = lhtml(res.text)
+
+            # Try all XPath selectors on the inner page
+            for selector in [
+                '//a[@id="downloadButton"]/@href',
+                '//a[@aria-label="Download file"]/@href',
+                '//a[contains(@class,"popsok")]/@href',
+            ]:
+                sub_link = html_tree.xpath(selector)
+                if sub_link and sub_link[0].startswith("http"):
+                    return sub_link[0]
+
+            # Regex fallback on the inner page raw HTML
+            raw = findall(
+                r'https?://download\d*\.mediafire\.com/[^"\'<>\s]+', res.text
+            )
+            if raw:
+                return raw[0]
+        except Exception:
+            pass
+
+    return href
+
+
 def _mediafire(url: str, session=None) -> str | dict:
+    """
+    Resolve a MediaFire file/folder URL to a direct download link.
+
+    Supports:
+      - Regular file links
+      - Password-protected files  (url::password)
+      - Folder links              (/folder/ in URL)
+      - Already-direct CDN links  (download\d+.mediafire.com)
+
+    Fallback chain (file links):
+      1. XPath  → a#downloadButton              (current primary button — 2024/2025)
+      2. XPath  → a[aria-label="Download file"] (legacy selector)
+      3. XPath  → a[contains(@class,"popsok")] (alternate class used on some pages)
+      4. XPath  → broad href scan for any mediafire download link
+      5. Regex  → raw HTML scan for download CDN URLs
+      6. MediaFire Public API v1.5              (no HTML parsing — most robust)
+    """
+    # ── Folder → delegate ─────────────────────────────────────────────────────
     if "/folder/" in url:
         return _mediafire_folder(url)
 
+    # ── Password split ────────────────────────────────────────────────────────
     pwd = None
     if "::" in url:
         pwd = url.split("::")[-1]
         url = url.split("::")[-2]
 
-    direct = findall(r"https?:\/\/download\d+\.mediafire\.com\/\S+\/\S+\/\S+", url)
-    if direct:
-        return direct[0]
+    # ── Already a direct CDN URL → return immediately ─────────────────────────
+    direct_match = findall(
+        r"https?://download\d*\.mediafire\.com/[^\s\"'<>]+", url
+    )
+    if direct_match:
+        return direct_match[0]
+
+    # ── Build clean URL (strip query params) ──────────────────────────────────
+    parsed    = urlparse(url)
+    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
     if session is None:
         session = _cloudscraper_session()
 
-    parsed = urlparse(url)
-    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 1 — Fetch the MediaFire page
+    # ─────────────────────────────────────────────────────────────────────────
+    try:
+        response  = session.get(
+            clean_url,
+            timeout=20,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Referer": "https://www.mediafire.com/",
+            },
+        )
+        page_text = response.text
+    except Exception as e:
+        raise DirectLinkException(f"MediaFire: failed to fetch page — {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2 — Parse HTML with lxml
+    # ─────────────────────────────────────────────────────────────────────────
+    html_tree = None
     try:
         from lxml.etree import HTML as lhtml
-        html = lhtml(session.get(clean_url).text)
+        html_tree = lhtml(page_text)
     except ImportError:
-        raise DirectLinkException("MediaFire: lxml required.")
+        pass  # lxml not installed → skip XPath fallbacks, go to regex/API
 
-    _mf_err = html.xpath('//p[@class="notranslate"]/text()')
-    if _mf_err:
-        raise DirectLinkException(f"MediaFire: {_mf_err[0]}")
+    # ── Error page detection ──────────────────────────────────────────────────
+    if html_tree is not None:
+        # Official error paragraph
+        mf_errors = html_tree.xpath('//p[@class="notranslate"]/text()')
+        if mf_errors:
+            raise DirectLinkException(f"MediaFire: {mf_errors[0].strip()}")
 
-    if html.xpath("//div[@class='passwordPrompt']"):
+        # Generic error text in divs
+        for err_text in html_tree.xpath('//div[contains(@class,"error")]//text()'):
+            err_lower = err_text.lower().strip()
+            if err_lower and any(
+                kw in err_lower
+                for kw in ("invalid", "removed", "not found", "doesn't exist", "unavailable")
+            ):
+                raise DirectLinkException(f"MediaFire: {err_text.strip()}")
+
+    # ── Password-protected page detection ─────────────────────────────────────
+    _pw_indicators = [
+        "passwordPrompt",
+        "password_container",
+        'name="downloadp"',
+        "This file is password protected",
+    ]
+    _is_password_page = (
+        any(ind in page_text for ind in _pw_indicators)
+        or (
+            html_tree is not None
+            and (
+                html_tree.xpath("//div[contains(@class,'passwordPrompt')]")
+                or html_tree.xpath("//div[contains(@class,'password_container')]")
+                or html_tree.xpath("//input[@name='downloadp']")
+            )
+        )
+    )
+
+    if _is_password_page:
         if not pwd:
             raise DirectLinkException(f"MediaFire: {PASSWORD_ERROR}")
-        html = lhtml(session.post(clean_url, data={"downloadp": pwd}).text)
-        if html.xpath("//div[@class='passwordPrompt']"):
+
+        # Submit password via POST
+        try:
+            resp2     = session.post(
+                clean_url,
+                data={"downloadp": pwd},
+                timeout=20,
+            )
+            page_text = resp2.text
+            if html_tree is not None:
+                html_tree = lhtml(page_text)
+        except Exception as e:
+            raise DirectLinkException(f"MediaFire: password submit failed — {e}")
+
+        # Still on password page → wrong password
+        if any(ind in page_text for ind in _pw_indicators):
             raise DirectLinkException("MediaFire: wrong password.")
 
-    link = html.xpath('//a[@aria-label="Download file"]/@href')
-    if not link:
-        raise DirectLinkException("MediaFire: download link not found.")
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 1 — a#downloadButton  (MediaFire's current primary button 2024/25)
+    # ─────────────────────────────────────────────────────────────────────────
+    if html_tree is not None:
+        link = html_tree.xpath('//a[@id="downloadButton"]/@href')
+        if link and link[0].strip():
+            resolved = _mf_resolve_indirect(link[0].strip(), pwd, session)
+            if resolved:
+                return resolved
 
-    if link[0].startswith("//"):
-        return _mediafire(f"https:{link[0]}" + (f"::{pwd}" if pwd else ""), session)
-    return link[0]
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 2 — aria-label="Download file"  (legacy selector)
+    # ─────────────────────────────────────────────────────────────────────────
+    if html_tree is not None:
+        link = html_tree.xpath('//a[@aria-label="Download file"]/@href')
+        if link and link[0].strip():
+            resolved = _mf_resolve_indirect(link[0].strip(), pwd, session)
+            if resolved:
+                return resolved
 
-def _mediafire_folder(url: str) -> dict:
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 3 — a[contains(@class,"popsok")]  (alternate button class)
+    # ─────────────────────────────────────────────────────────────────────────
+    if html_tree is not None:
+        link = html_tree.xpath('//a[contains(@class,"popsok")]/@href')
+        if link and link[0].strip():
+            resolved = _mf_resolve_indirect(link[0].strip(), pwd, session)
+            if resolved:
+                return resolved
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 4 — Broad href scan: any <a> linking to a mediafire download
+    # ─────────────────────────────────────────────────────────────────────────
+    if html_tree is not None:
+        for href in html_tree.xpath("//a/@href"):
+            href = (href or "").strip()
+            if href and "mediafire.com" in href and "download" in href.lower():
+                resolved = _mf_resolve_indirect(href, pwd, session)
+                if resolved:
+                    return resolved
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 5 — Raw HTML regex: scan for CDN download URLs
+    # ─────────────────────────────────────────────────────────────────────────
+    raw_cdn_links = findall(
+        r'https?://download\d*\.mediafire\.com/[^"\'<>\s\\]+',
+        page_text,
+    )
+    if raw_cdn_links:
+        return raw_cdn_links[0]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK 6 — MediaFire Public API v1.5
+    #   Uses the file's quick_key extracted from the URL.
+    #   Returns the direct normal_download link without HTML scraping.
+    # ─────────────────────────────────────────────────────────────────────────
+    key_match = search(r"/file/([a-zA-Z0-9]+)", clean_url)
+    if key_match:
+        file_key = key_match.group(1)
+        try:
+            api_res = session.get(
+                "https://www.mediafire.com/api/1.5/file/get_links.php",
+                params={
+                    "quick_key":      file_key,
+                    "link_type":      "normal_download",
+                    "response_format": "json",
+                },
+                timeout=15,
+            ).json()
+
+            resp_data  = api_res.get("response", {})
+            api_result = resp_data.get("result", "")
+
+            if api_result == "Success":
+                links_list = resp_data.get("links", [])
+                if links_list:
+                    dl_link = links_list[0].get("normal_download", "")
+                    if dl_link:
+                        resolved = _mf_resolve_indirect(dl_link, pwd, session)
+                        if resolved:
+                            return resolved
+
+            elif api_result == "Error":
+                api_error = resp_data.get("message", "unknown API error")
+                LOGGER.warning(f"[MediaFire] API error for key={file_key}: {api_error}")
+
+        except Exception as api_exc:
+            LOGGER.warning(f"[MediaFire] API fallback failed: {api_exc}")
+
+    # ── All 6 fallbacks exhausted ─────────────────────────────────────────────
+    raise DirectLinkException(
+        "MediaFire: download link পাওয়া যায়নি।\n"
+        "সম্ভাব্য কারণ:\n"
+        "  • File টি মুছে ফেলা হয়েছে\n"
+        "  • File টি private করা হয়েছে\n"
+        "  • MediaFire তাদের HTML structure পুনরায় পরিবর্তন করেছে\n"
+        "  • Temporary server error"
+    )
+
+
+def _mediafire_folder(url: str) -> dict | str:
+    """
+    Resolve a MediaFire folder URL to a structured dict of direct download links.
+
+    Uses MediaFire's public API v1.5 for:
+      - Folder metadata (name, key)
+      - File listing with pagination (chunk-based, 100 files per chunk)
+      - Sub-folder recursion
+      - Per-file direct link resolution via _mediafire()
+
+    Returns:
+        str  — if folder contains exactly 1 file (returns its direct URL)
+        dict — {"title", "total_size", "contents": [{"filename","path","url"}]}
+    """
+    # ── Password split ────────────────────────────────────────────────────────
     pwd = None
     if "::" in url:
         pwd = url.split("::")[-1]
         url = url.split("::")[-2]
 
-    key = url.split("/")[-1].split(",")
+    # ── Extract folder key(s) from URL ────────────────────────────────────────
+    # Handles both:
+    #   /folder/abc123def456/FolderName
+    #   /folder/abc123,def456,ghi789  (multi-folder)
+    path_part   = urlparse(url).path
+    after_folder = path_part.split("/folder/")[-1]
+    # First path segment only (ignore /FolderName suffix)
+    first_segment = after_folder.split("/")[0]
+    raw_keys      = first_segment.split(",")
+    folder_keys   = [k.strip() for k in raw_keys if k.strip()]
 
-    details = {"contents": [], "title": "", "total_size": 0, "header": ""}
+    if not folder_keys:
+        raise DirectLinkException(
+            "MediaFire: URL থেকে folder key বের করা যায়নি।"
+        )
+
+    details = {
+        "contents":   [],
+        "title":      "",
+        "total_size": 0,
+        "header":     "",
+    }
+
     session = _cloudscraper_session()
 
-    def _scrape_link(file_url: str) -> str | None:
-        try:
-            from lxml.etree import HTML as lhtml
-            clean = urlparse(file_url)
-            html = lhtml(session.get(f"{clean.scheme}://{clean.netloc}{clean.path}").text)
-            if html.xpath("//div[@class='passwordPrompt']"):
-                if not pwd:
-                    return None
-                html = lhtml(session.post(f"{clean.scheme}://{clean.netloc}{clean.path}",
-                                          data={"downloadp": pwd}).text)
-            link = html.xpath('//a[@id="downloadButton"]/@href')
-            if link:
-                return link[0] if link[0].startswith("http") else None
-        except Exception:
-            return None
+    # ─────────────────────────────────────────────────────────────────────────
+    # INNER HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def _get_content(folder_key: str, folder_path: str = ""):
-        params = {"content_type": "files", "folder_key": folder_key, "response_format": "json"}
-        res = session.get("https://www.mediafire.com/api/1.5/folder/get_content.php", params=params).json()
-        files = res.get("response", {}).get("folder_content", {}).get("files", [])
-        for f in files:
-            dl = _scrape_link(f.get("links", {}).get("normal_download", ""))
-            if not dl:
+    def _resolve_file_link(file_info: dict) -> str:
+        """
+        Given the 'file' dict from the API, attempt to get a direct CDN URL.
+
+        Priority:
+          1. If 'direct_download' key exists and is a CDN URL → use directly
+          2. normal_download link  → resolve via _mediafire() (may be a page)
+          3. view link             → resolve via _mediafire()
+          4. Return empty string on total failure
+        """
+        links = file_info.get("links", {})
+
+        # Priority 1: direct CDN link from API (not always present)
+        direct = links.get("direct_download", "")
+        if direct and "download" in direct and "mediafire.com" in direct:
+            return direct
+
+        # Priority 2 & 3: normal_download or view page → resolve
+        for link_key in ("normal_download", "view"):
+            page_link = links.get(link_key, "")
+            if not page_link:
                 continue
-            details["contents"].append({
-                "filename": f["filename"],
-                "path": folder_path or details["title"],
-                "url": dl,
-            })
             try:
-                details["total_size"] += float(f.get("size", 0))
+                pwd_suffix = f"::{pwd}" if pwd else ""
+                resolved   = _mediafire(page_link + pwd_suffix, session)
+                if resolved and isinstance(resolved, str):
+                    return resolved
+            except DirectLinkException:
+                continue
             except Exception:
+                continue
+
+        return ""
+
+    def _collect_files(folder_key: str, folder_path: str) -> None:
+        """Paginate through all files in a folder and add them to details."""
+        chunk        = 1
+        total_chunks = 1   # Will be updated after first API call
+
+        while chunk <= total_chunks:
+            try:
+                res = session.get(
+                    "https://www.mediafire.com/api/1.5/folder/get_content.php",
+                    params={
+                        "content_type":    "files",
+                        "folder_key":      folder_key,
+                        "chunk":           chunk,
+                        "chunk_size":      100,
+                        "order_by":        "name",
+                        "order_direction": "asc",
+                        "response_format": "json",
+                    },
+                    timeout=20,
+                )
+                data = res.json()
+            except Exception as exc:
+                LOGGER.warning(f"[MediaFire folder] API chunk {chunk} failed: {exc}")
+                break
+
+            resp_obj       = data.get("response", {})
+            folder_content = resp_obj.get("folder_content", {})
+
+            if resp_obj.get("result") != "Success":
+                LOGGER.warning(
+                    f"[MediaFire folder] API result not Success: "
+                    f"{resp_obj.get('message', 'unknown')}"
+                )
+                break
+
+            # Update total chunk count from first response
+            try:
+                total_chunks = int(folder_content.get("chunks", total_chunks))
+            except (ValueError, TypeError):
                 pass
 
-        params2 = {"content_type": "folders", "folder_key": folder_key, "response_format": "json"}
-        res2 = session.get("https://www.mediafire.com/api/1.5/folder/get_content.php", params=params2).json()
-        folders = res2.get("response", {}).get("folder_content", {}).get("folders", [])
-        for sub in folders:
-            new_path = f"{folder_path}/{sub['name']}" if folder_path else sub["name"]
-            _get_content(sub["folderkey"], new_path)
+            for f in folder_content.get("files", []):
+                filename   = f.get("filename") or f"file_{len(details['contents']) + 1}"
+                direct_url = _resolve_file_link(f)
 
-    for fkey in (key if isinstance(key, list) else [key]):
-        info_res = session.post("https://www.mediafire.com/api/1.5/folder/get_info.php",
-                                data={"folder_key": fkey, "response_format": "json"}).json()
-        info = info_res.get("response", {}).get("folder_info")
-        if info:
-            details["title"] = info.get("name", fkey)
-            _get_content(fkey)
+                if direct_url:
+                    details["contents"].append({
+                        "filename": filename,
+                        "path":     folder_path,
+                        "url":      direct_url,
+                    })
+                    try:
+                        details["total_size"] += int(f.get("size", 0))
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    LOGGER.warning(
+                        f"[MediaFire folder] Could not resolve link for: {filename}"
+                    )
 
+            chunk += 1
+
+    def _collect_subfolders(folder_key: str, parent_path: str) -> None:
+        """Recursively collect all sub-folders and their files."""
+        chunk        = 1
+        total_chunks = 1
+
+        while chunk <= total_chunks:
+            try:
+                res = session.get(
+                    "https://www.mediafire.com/api/1.5/folder/get_content.php",
+                    params={
+                        "content_type":    "folders",
+                        "folder_key":      folder_key,
+                        "chunk":           chunk,
+                        "chunk_size":      100,
+                        "response_format": "json",
+                    },
+                    timeout=20,
+                )
+                data = res.json()
+            except Exception as exc:
+                LOGGER.warning(f"[MediaFire folder] Sub-folder API chunk {chunk} failed: {exc}")
+                break
+
+            resp_obj       = data.get("response", {})
+            folder_content = resp_obj.get("folder_content", {})
+
+            if resp_obj.get("result") != "Success":
+                break
+
+            try:
+                total_chunks = int(folder_content.get("chunks", total_chunks))
+            except (ValueError, TypeError):
+                pass
+
+            for sub in folder_content.get("folders", []):
+                sub_key  = sub.get("folderkey", "")
+                sub_name = sub.get("name", sub_key)
+
+                if not sub_key:
+                    continue
+
+                # Build nested path
+                new_path = (
+                    f"{parent_path}/{sub_name}" if parent_path else sub_name
+                )
+
+                # Recurse: files first, then deeper sub-folders
+                _collect_files(sub_key, new_path)
+                _collect_subfolders(sub_key, new_path)
+
+            chunk += 1
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MAIN LOOP — process each folder key
+    # ─────────────────────────────────────────────────────────────────────────
+    for fkey in folder_keys:
+        # ── Get folder metadata (name) ────────────────────────────────────────
+        try:
+            info_res = session.post(
+                "https://www.mediafire.com/api/1.5/folder/get_info.php",
+                data={
+                    "folder_key":      fkey,
+                    "response_format": "json",
+                },
+                timeout=15,
+            ).json()
+
+            folder_info = (
+                info_res
+                .get("response", {})
+                .get("folder_info", {})
+            )
+
+            if not details["title"]:
+                details["title"] = folder_info.get("name") or fkey
+
+        except Exception as exc:
+            LOGGER.warning(f"[MediaFire folder] get_info failed for key={fkey}: {exc}")
+            if not details["title"]:
+                details["title"] = fkey
+
+        # ── Collect all files (flat + recursive sub-folders) ──────────────────
+        root_path = details["title"]
+        _collect_files(fkey, root_path)
+        _collect_subfolders(fkey, root_path)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # RESULT
+    # ─────────────────────────────────────────────────────────────────────────
     if not details["contents"]:
-        raise DirectLinkException("MediaFire: no files found in folder.")
+        raise DirectLinkException(
+            "MediaFire: folder-এ কোনো file পাওয়া যায়নি।\n"
+            "সম্ভাব্য কারণ:\n"
+            "  • Folder টি empty\n"
+            "  • Folder টি private বা password-protected\n"
+            "  • সব file এর link resolve করা ব্যর্থ হয়েছে"
+        )
+
+    # Single file in folder → return plain URL string
     if len(details["contents"]) == 1:
-        return (details["contents"][0]["url"], [details["header"]])
+        return details["contents"][0]["url"]
+
     return details
 
 
@@ -1356,7 +1774,7 @@ def _yandex_disk(url: str) -> str:
     links = findall(r"\b(https?://(yadi\.sk|disk\.yandex\.(com|ru))\S+)", url)
     if not links:
         raise DirectLinkException("Yandex Disk: no valid link found.")
-    api = f"https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key={links[0][0]}"
+    api = f"https://cloud-api.yandex.net/v1.0/disk/public/resources/download?public_key={links[0][0]}"
     res = requests.get(api).json()
     if "href" not in res:
         raise DirectLinkException("Yandex Disk: file not found or download limit reached.")
