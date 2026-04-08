@@ -2,15 +2,9 @@
 # Channel t.me/juktijol
 #
 # utils/tracker.py
-# ─────────────────
-# ইউজার ট্র্যাকিং মডিউল।
-# প্রতিটা ডাউনলোডের সময় admin-কে notify করে এবং
-# ডাউনলোড করা ফাইল LOG_GROUP_ID-তে পাঠায়।
-#
-# ✅ FIXED: Private channel name → bot member না হলে graceful fallback
-# ✅ FIXED: t.me/c/.../topic/msg → thread/topic link regex সংশোধন
-# ✅ FIXED: Public link regex → "c" username ধরে না ফেলার সুরক্ষা
-# ✅ FIXED: log_file_to_group video → width/height/duration যোগ
+# ✅ FIXED: Private channel name → user client দিয়ে resolve
+# ✅ FIXED: Thread/topic link regex
+# ✅ FIXED: Graceful fallback on all errors
 
 import os
 import re
@@ -28,7 +22,7 @@ from pyrogram.errors import (
 import asyncio
 
 from .logging_setup import LOGGER
-from .helper import get_video_thumbnail, get_video_resolution
+from .helper import get_video_thumbnail
 
 # ── IST timezone (UTC+5:30) ────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -39,46 +33,29 @@ def _now_ist() -> str:
 
 
 def _link_type(url: str) -> str:
-    """Public নাকি Private লিংক?"""
     if "/c/" in url or "t.me/c/" in url:
         return "🔒 Private"
     return "✅ Public"
 
 
-def _extract_ids_from_url(url: str) -> tuple[str | None, int | None]:
+def _extract_ids_from_url(url: str) -> tuple:
     """
     URL থেকে (channel_identifier, msg_id) বের করো।
 
-    Supported formats:
-      Public : t.me/username/123
-      Public : t.me/username/topic/123   (topic/thread)
+    Formats:
+      Public:  t.me/username/123
+      Public:  t.me/username/topic/123
       Private: t.me/c/1234567890/123
-      Private: t.me/c/1234567890/6/527   (topic/thread)
-
-    Returns:
-        (channel_id_or_username, msg_id)
-        Private → channel_id is numeric string e.g. "1234567890"
-        Public  → channel_id is "@username"
-        None, None on failure
+      Private: t.me/c/1234567890/topic/123
     """
-    # ── Private link ──────────────────────────────────────────────────────
-    # t.me/c/CHANNEL_ID/MSG_ID
-    # t.me/c/CHANNEL_ID/TOPIC_ID/MSG_ID
-    pvt = re.search(
-        r"t\.me/c/(\d+)/(?:\d+/)?(\d+)",
-        url
-    )
+    # Private link — আগে check করো
+    pvt = re.search(r"t\.me/c/(\d+)/(?:\d+/)?(\d+)", url)
     if pvt:
         return pvt.group(1), int(pvt.group(2))
 
-    # ── Public link ───────────────────────────────────────────────────────
-    # t.me/USERNAME/MSG_ID
-    # t.me/USERNAME/TOPIC_ID/MSG_ID
-    # ✅ [^c] নয়, বরং username "c" হলেও চলবে কিন্তু
-    #    pvt আগে check হয়েছে তাই t.me/c/... এখানে আসবে না
+    # Public link
     pub = re.search(
-        r"t\.me/([a-zA-Z][a-zA-Z0-9_]{3,})/(?:\d+/)?(\d+)",
-        url
+        r"t\.me/([a-zA-Z][a-zA-Z0-9_]{3,})/(?:\d+/)?(\d+)", url
     )
     if pub:
         return f"@{pub.group(1)}", int(pub.group(2))
@@ -86,20 +63,74 @@ def _extract_ids_from_url(url: str) -> tuple[str | None, int | None]:
     return None, None
 
 
-async def _resolve_channel_name(bot: Client, url: str) -> str:
+# ══════════════════════════════════════════════════════════════════════════
+# ✅ CORE FIX: User client দিয়ে private channel name resolve
+# ══════════════════════════════════════════════════════════════════════════
+
+async def _get_user_client_for_resolve(user_id: int):
     """
-    URL থেকে চ্যানেল/গ্রুপের নাম বের করার চেষ্টা।
+    MongoDB থেকে user-এর প্রথম session নিয়ে একটা temporary client বানাও।
+    শুধু channel name resolve করার জন্য — হালকা ও fast।
 
-    ✅ FIXED: Private channel-এ bot member না থাকলে
-       CHANNEL_INVALID error আসে।
-       এখন সেটা gracefully handle করে fallback দেয়।
+    Returns:
+        user_client অথবা None
+    """
+    try:
+        # core থেকে import — circular import এড়াতে function-এর ভেতরে
+        from core import user_sessions
+        from pyrogram import Client as PyroClient
 
-    ✅ FIXED: t.me/c/.../topic/msg format এখন সঠিকভাবে parse হয়।
+        user_session = await asyncio.wait_for(
+            user_sessions.find_one({"user_id": user_id}),
+            timeout=5.0
+        )
 
-    Priority:
-      1. bot.get_chat() দিয়ে চেষ্টা করো
-      2. Fail করলে URL থেকে readable name বানাও
-      3. শেষ fallback: URL নিজেই return করো
+        if not user_session or not user_session.get("sessions"):
+            return None
+
+        sessions = user_session["sessions"]
+        if not sessions:
+            return None
+
+        # প্রথম available session নাও
+        session = sessions[0]
+
+        user_client = PyroClient(
+            name=f"resolve_{user_id}",
+            session_string=session["session_string"],
+            in_memory=True,    # ✅ no SQLite file
+            no_updates=True,   # ✅ no background task
+            workers=1,         # ✅ minimum — শুধু resolve করব
+        )
+        await asyncio.wait_for(user_client.start(), timeout=8.0)
+        return user_client
+
+    except asyncio.TimeoutError:
+        LOGGER.warning(f"[Tracker] User client timeout for resolve (user {user_id})")
+        return None
+    except Exception as e:
+        LOGGER.warning(f"[Tracker] Could not create resolve client: {e}")
+        return None
+
+
+async def _resolve_channel_name(
+    bot: Client,
+    url: str,
+    user_id: int | None = None,
+) -> str:
+    """
+    URL থেকে চ্যানেলের নাম বের করো।
+
+    ✅ Strategy (priority order):
+      1. Public channel → bot.get_chat() দিয়ে সরাসরি
+      2. Private channel → user client দিয়ে get_chat()
+         (user সেই channel-এর member, bot নয়)
+      3. সব fail → readable fallback
+
+    Args:
+        bot:     bot client
+        url:     telegram link
+        user_id: যে user request করেছে — তার session দিয়ে private resolve
     """
     channel_id, _ = _extract_ids_from_url(url)
 
@@ -107,65 +138,102 @@ async def _resolve_channel_name(bot: Client, url: str) -> str:
         LOGGER.warning(f"[Tracker] Could not parse channel from URL: {url}")
         return url
 
-    # ── Private channel ───────────────────────────────────────────────────
-    if channel_id.lstrip("-").isdigit() or (
-        channel_id.startswith("-100")
-    ):
-        # Numeric ID → private channel
-        raw_id = channel_id  # e.g. "1234567890"
-        try:
-            from pyrogram.utils import get_channel_id
-            cid = get_channel_id(int(raw_id))
-        except Exception:
-            cid = int(raw_id)
+    is_private = not str(channel_id).startswith("@")
 
-        try:
-            chat  = await bot.get_chat(cid)
-            title = getattr(chat, "title", None) or str(raw_id)
-            LOGGER.info(f"[Tracker] Resolved private channel: {title}")
-            return f"{title} (Private)"
-
-        except (ChannelInvalid, ChannelPrivate, PeerIdInvalid, BadRequest) as e:
-            # ✅ Bot এই private channel-এর member নয়
-            # এটা expected — error log নয়, info log করো
-            LOGGER.info(
-                f"[Tracker] Bot not in private channel {raw_id} "
-                f"({type(e).__name__}) — using ID as name"
-            )
-            # Readable fallback: channel ID দিয়ে বানাও
-            return f"Private Channel ({raw_id})"
-
-        except Exception as e:
-            LOGGER.warning(
-                f"[Tracker] Unexpected error resolving private channel "
-                f"{raw_id}: {e}"
-            )
-            return f"Private Channel ({raw_id})"
-
-    # ── Public channel ────────────────────────────────────────────────────
-    else:
-        # channel_id is "@username"
+    # ── Public channel → bot দিয়েই পারবে ─────────────────────────────────
+    if not is_private:
         try:
             chat  = await bot.get_chat(channel_id)
             title = getattr(chat, "title", None) or channel_id
-            LOGGER.info(f"[Tracker] Resolved public channel: {title}")
+            LOGGER.info(f"[Tracker] Public channel resolved: {title}")
             return f"{title} ({channel_id})"
 
-        except (ChannelInvalid, ChannelPrivate, PeerIdInvalid, BadRequest) as e:
-            LOGGER.info(
-                f"[Tracker] Could not resolve public channel {channel_id}: "
-                f"{type(e).__name__}"
-            )
-            # username থেকে readable fallback
-            clean = channel_id.lstrip("@")
+        except (ChannelInvalid, ChannelPrivate, PeerIdInvalid, BadRequest):
+            clean = str(channel_id).lstrip("@")
             return f"@{clean}"
-
         except Exception as e:
-            LOGGER.warning(
-                f"[Tracker] Unexpected error resolving public channel "
-                f"{channel_id}: {e}"
-            )
-            return channel_id
+            LOGGER.warning(f"[Tracker] Public resolve error: {e}")
+            return str(channel_id)
+
+    # ── Private channel ────────────────────────────────────────────────────
+    raw_id = str(channel_id)  # e.g. "2821790337"
+
+    try:
+        from pyrogram.utils import get_channel_id
+        cid = get_channel_id(int(raw_id))  # -1002821790337
+    except Exception:
+        cid = int(raw_id)
+
+    # Step 1: Bot দিয়ে চেষ্টা করো (bot যদি সেই channel-এ থাকে)
+    try:
+        chat  = await bot.get_chat(cid)
+        title = getattr(chat, "title", None) or raw_id
+        LOGGER.info(f"[Tracker] Private channel resolved via bot: {title}")
+        return f"{title} (Private)"
+
+    except (ChannelInvalid, ChannelPrivate, PeerIdInvalid, BadRequest):
+        # Bot নেই → user client দিয়ে চেষ্টা করো
+        LOGGER.info(
+            f"[Tracker] Bot not in private channel {raw_id} "
+            f"→ trying user client"
+        )
+    except Exception as e:
+        LOGGER.warning(f"[Tracker] Bot resolve error for {raw_id}: {e}")
+
+    # Step 2: User client দিয়ে চেষ্টা
+    if user_id is None:
+        LOGGER.info(
+            f"[Tracker] No user_id provided for private resolve → "
+            f"fallback to ID"
+        )
+        return f"Private Channel ({raw_id})"
+
+    user_client = await _get_user_client_for_resolve(user_id)
+
+    if user_client is None:
+        LOGGER.info(
+            f"[Tracker] No user session for {user_id} → fallback to ID"
+        )
+        return f"Private Channel ({raw_id})"
+
+    try:
+        chat  = await asyncio.wait_for(
+            user_client.get_chat(cid),
+            timeout=8.0
+        )
+        title = getattr(chat, "title", None) or raw_id
+        LOGGER.info(
+            f"[Tracker] Private channel resolved via user client: {title}"
+        )
+        return f"{title} (Private)"
+
+    except asyncio.TimeoutError:
+        LOGGER.warning(
+            f"[Tracker] User client get_chat timeout for {raw_id}"
+        )
+        return f"Private Channel ({raw_id})"
+
+    except (ChannelInvalid, ChannelPrivate, PeerIdInvalid, BadRequest) as e:
+        # User-ও সেই channel-এ নেই
+        LOGGER.info(
+            f"[Tracker] User client also cannot access {raw_id}: "
+            f"{type(e).__name__}"
+        )
+        return f"Private Channel ({raw_id})"
+
+    except Exception as e:
+        LOGGER.warning(
+            f"[Tracker] User client resolve error for {raw_id}: {e}"
+        )
+        return f"Private Channel ({raw_id})"
+
+    finally:
+        # ✅ সবসময় client বন্ধ করো
+        try:
+            from .helper import safe_stop_client
+            await safe_stop_client(user_client)
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -182,8 +250,7 @@ async def notify_admin_link(
     """
     Admin-কে ডাউনলোড রিকোয়েস্ট সম্পর্কে জানায়।
 
-    channel_name পাস করলে resolve করার চেষ্টা করবে না।
-    না করলে URL থেকে নিজেই resolve করবে।
+    ✅ user.id দিয়ে private channel name resolve হবে।
     """
     if not admin_id:
         return
@@ -195,9 +262,9 @@ async def notify_admin_link(
     username = f"@{user.username}" if user.username else "N/A"
     ltype    = _link_type(url)
 
-    # channel_name না দেওয়া হলে নিজেই বের করো
     if channel_name is None:
-        channel_name = await _resolve_channel_name(bot, url)
+        # ✅ user.id পাস করো — private channel resolve-এ কাজে লাগবে
+        channel_name = await _resolve_channel_name(bot, url, user_id=user.id)
 
     text = (
         "📌 **New Download Request**\n"
@@ -248,19 +315,13 @@ async def log_file_to_group(
     caption_original: str = "",
     channel_name: str | None = None,
     thumbnail_path: str | None = None,
-    # ✅ video metadata — squish সমস্যা সমাধানের জন্য
-    width: int = 0,
-    height: int = 0,
-    duration: int = 0,
 ):
     """
-    ডাউনলোড করা ফাইলটি LOG_GROUP_ID-তে পাঠায় সব তথ্য সহ।
+    ডাউনলোড করা ফাইলটি LOG_GROUP_ID-তে পাঠায়।
 
-    file_path (disk) অথবা file_id (Telegram) যেকোনো একটা দিলেই হবে।
-
-    ✅ FIXED: channel_name → private channel-এ bot না থাকলে
-              graceful fallback (CHANNEL_INVALID এড়ানো)
-    ✅ FIXED: video log → width/height/duration সহ পাঠানো হচ্ছে
+    ✅ FIXED: channel_name → user client দিয়ে private resolve
+    ✅ SIMPLIFIED: video resolution overhead সরানো হয়েছে
+                  (performance priority)
     """
     if not log_group_id:
         return
@@ -272,11 +333,10 @@ async def log_file_to_group(
     username = f"@{user.username}" if user.username else "N/A"
     ltype    = _link_type(url)
 
-    # channel_name resolve
+    # ✅ user.id পাস করো
     if channel_name is None:
-        channel_name = await _resolve_channel_name(bot, url)
+        channel_name = await _resolve_channel_name(bot, url, user_id=user.id)
 
-    # User footer (reply message)
     user_footer = (
         "📥 **Downloaded File Log**\n"
         f"👤 **User:** `{full_name}`\n"
@@ -289,7 +349,6 @@ async def log_file_to_group(
         f"🕐 **Time:** `{_now_ist()}`"
     )
 
-    # Original caption — 1000 char limit
     orig = (caption_original or "").strip()
     if len(orig) > 1000:
         orig = orig[:997] + "..."
@@ -297,7 +356,7 @@ async def log_file_to_group(
     sent_msg = None
 
     try:
-        # ── file_id দিয়ে পাঠানো (re-upload without downloading) ──────────
+        # ── file_id দিয়ে পাঠানো ───────────────────────────────────────────
         if file_id:
             if media_type == "photo":
                 sent_msg = await bot.send_photo(
@@ -306,14 +365,11 @@ async def log_file_to_group(
                     caption=orig,
                 )
             elif media_type == "video":
+                # ✅ fast path — metadata overhead নেই
                 sent_msg = await bot.send_video(
                     chat_id=log_group_id,
                     video=file_id,
                     caption=orig,
-                    # ✅ metadata পাস হলে ব্যবহার করো
-                    width=width if width > 0 else None,
-                    height=height if height > 0 else None,
-                    duration=duration if duration > 0 else None,
                     supports_streaming=True,
                 )
             elif media_type == "audio":
@@ -329,67 +385,25 @@ async def log_file_to_group(
                     caption=orig,
                 )
 
-        # ── file_path (disk) থেকে upload ─────────────────────────────────
+        # ── file_path থেকে upload ─────────────────────────────────────────
         elif file_path and os.path.exists(file_path):
 
             if media_type == "video":
-                # ── Thumbnail ─────────────────────────────────────────────
-                log_thumb      = None
-                auto_log_thumb = None
+                # Thumbnail — শুধু caller দিলে ব্যবহার করো
+                # auto-generate করব না — performance priority
+                log_thumb = (
+                    thumbnail_path
+                    if thumbnail_path and os.path.exists(thumbnail_path)
+                    else None
+                )
 
-                if thumbnail_path and os.path.exists(thumbnail_path):
-                    log_thumb = thumbnail_path
-                else:
-                    auto_log_thumb = await get_video_thumbnail(file_path, 0)
-                    if auto_log_thumb and os.path.exists(auto_log_thumb):
-                        log_thumb = auto_log_thumb
-
-                # ── Resolution ────────────────────────────────────────────
-                # ✅ FIXED: ffprobe দিয়ে actual resolution নাও
-                # caller থেকে পাস হলে সেটা ব্যবহার করো (সবচেয়ে accurate)
-                # না হলে ffprobe দিয়ে detect করো
-                if width > 0 and height > 0:
-                    final_width  = width
-                    final_height = height
-                    LOGGER.info(
-                        f"[Tracker] Using passed resolution: "
-                        f"{final_width}x{final_height}"
-                    )
-                else:
-                    final_width, final_height = await get_video_resolution(
-                        file_path
-                    )
-                    LOGGER.info(
-                        f"[Tracker] ffprobe resolution: "
-                        f"{final_width}x{final_height}"
-                    )
-
-                # ── Duration ──────────────────────────────────────────────
-                if duration > 0:
-                    final_duration = duration
-                else:
-                    from .helper import get_media_info
-                    final_duration, _, _ = await get_media_info(file_path)
-                    final_duration = final_duration or 0
-
-                try:
-                    sent_msg = await bot.send_video(
-                        chat_id=log_group_id,
-                        video=file_path,
-                        thumb=log_thumb,
-                        caption=orig,
-                        width=final_width,
-                        height=final_height,
-                        duration=final_duration,
-                        supports_streaming=True,
-                    )
-                finally:
-                    # auto-generated thumbnail cleanup
-                    if auto_log_thumb and os.path.exists(auto_log_thumb):
-                        try:
-                            os.remove(auto_log_thumb)
-                        except Exception:
-                            pass
+                sent_msg = await bot.send_video(
+                    chat_id=log_group_id,
+                    video=file_path,
+                    thumb=log_thumb,
+                    caption=orig,
+                    supports_streaming=True,
+                )
 
             elif media_type == "photo":
                 sent_msg = await bot.send_photo(
@@ -412,7 +426,7 @@ async def log_file_to_group(
                     caption=orig,
                 )
 
-        # ── ফাইল নেই — plain text log ─────────────────────────────────────
+        # ── ফাইল নেই — plain text ─────────────────────────────────────────
         else:
             sent_msg = await bot.send_message(
                 chat_id=log_group_id,
