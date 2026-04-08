@@ -4,6 +4,7 @@
 # ✅ FIXED: AUTH_KEY_UNREGISTERED → session auto-remove + user notify
 # ✅ FIXED: safe_stop_client → no TCPTransport error
 # ✅ FIXED: edit_text after error → try-except wrap
+# ✅ FIXED: Video aspect ratio (squished) → width/height/duration metadata preserved
 
 import os
 import re
@@ -95,6 +96,55 @@ def is_private_link(url: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ✅ NEW HELPER: ভিডিও মেটাডেটা নিরাপদে extract করার ফাংশন
+# এটি width, height, duration সঠিকভাবে বের করে
+# squished ভিডিওর মূল সমাধান এখানে
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_video_metadata(chat_message) -> dict:
+    """
+    Source message থেকে video metadata extract করে।
+    width, height, duration না দিলে Telegram ভুল aspect ratio দেখায়।
+    
+    Returns:
+        dict: width, height, duration কী সহ metadata dict
+    """
+    metadata = {
+        "width": 0,
+        "height": 0,
+        "duration": 0,
+    }
+
+    video = chat_message.video
+    if video:
+        # ✅ সরাসরি video object থেকে নাও
+        metadata["width"]    = getattr(video, "width",    0) or 0
+        metadata["height"]   = getattr(video, "height",   0) or 0
+        metadata["duration"] = getattr(video, "duration", 0) or 0
+
+    elif chat_message.document:
+        # document হিসেবে আসা video-র জন্য
+        doc = chat_message.document
+        metadata["width"]    = getattr(doc, "width",    0) or 0
+        metadata["height"]   = getattr(doc, "height",   0) or 0
+        metadata["duration"] = getattr(doc, "duration", 0) or 0
+
+    elif chat_message.animation:
+        anim = chat_message.animation
+        metadata["width"]    = getattr(anim, "width",    0) or 0
+        metadata["height"]   = getattr(anim, "height",   0) or 0
+        metadata["duration"] = getattr(anim, "duration", 0) or 0
+
+    LOGGER.debug(
+        f"[VideoMeta] Extracted → "
+        f"width={metadata['width']}, "
+        f"height={metadata['height']}, "
+        f"duration={metadata['duration']}s"
+    )
+    return metadata
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ✅ FIX: On AUTH_KEY_UNREGISTERED, remove expired session from MongoDB
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -119,7 +169,6 @@ async def _handle_auth_key_unregistered(user_id: int, session_id: str, bot, mess
     except Exception as e:
         LOGGER.error(f"[AuthKey] Failed to remove expired session: {e}")
 
-    # Notify user
     try:
         await bot.send_message(
             chat_id=message.chat.id,
@@ -180,8 +229,8 @@ def setup_autolink_handler(app: Client):
                 user_client = Client(
                     name=f"user_session_{user_id}_{session_id}",
                     session_string=session["session_string"],
-                    in_memory=True,    # ✅ no SQLite file on disk
-                    no_updates=True,   # ✅ no handle_updates() task
+                    in_memory=True,   # ✅ no SQLite file on disk
+                    no_updates=True,  # ✅ no handle_updates() task
                     workers=4,
                 )
                 await asyncio.wait_for(user_client.start(), timeout=10.0)
@@ -404,6 +453,17 @@ def setup_autolink_handler(app: Client):
                     "document"
                 )
 
+                # ✅ FIX: video metadata extract করো — squish ঠিক করার মূল জায়গা
+                video_metadata = {}
+                if media_type == "video":
+                    video_metadata = extract_video_metadata(chat_message)
+                    LOGGER.info(
+                        f"[ProtectedPublic] Video metadata: "
+                        f"w={video_metadata['width']}, "
+                        f"h={video_metadata['height']}, "
+                        f"dur={video_metadata['duration']}s"
+                    )
+
                 try:
                     await send_media_to_saved(
                         user_client=user_client,
@@ -414,7 +474,11 @@ def setup_autolink_handler(app: Client):
                         caption=parsed_caption,
                         progress_message=processing_msg,
                         start_time=start_time,
-                        thumbnail_path=thumbnail_path
+                        thumbnail_path=thumbnail_path,
+                        # ✅ FIX: metadata পাস করো যাতে aspect ratio ঠিক থাকে
+                        width=video_metadata.get("width", 0),
+                        height=video_metadata.get("height", 0),
+                        duration=video_metadata.get("duration", 0),
                     )
                     if LOG_GROUP_ID and os.path.exists(media_path):
                         try:
@@ -432,7 +496,6 @@ def setup_autolink_handler(app: Client):
                         except Exception as e:
                             LOGGER.warning(f"[Tracker] Protected public log error: {e}")
                 except AuthKeyUnregistered:
-                    # ✅ Session expired → remove in MongoDB + notify user
                     await _handle_auth_key_unregistered(user_id, session_id, bot, message)
                 except Exception as e:
                     try:
@@ -496,7 +559,6 @@ def setup_autolink_handler(app: Client):
                 pass
             LOGGER.error(f"Protected public DL failed for user {user_id}: {e}")
         finally:
-            # ✅ use safe_stop_client — ignore harmless OSError
             await safe_stop_client(user_client)
 
     # ── PATH 1 + PATH 2: PUBLIC LINK HANDLER ─────────────────────────────────
@@ -665,6 +727,9 @@ def setup_autolink_handler(app: Client):
                     return
 
             elif source_message.video:
+                # ✅ FIX: source video থেকে সঠিক metadata নাও
+                video_meta = extract_video_metadata(source_message)
+
                 try:
                     user_data = await asyncio.wait_for(
                         user_activity_collection.find_one({"user_id": user_id}),
@@ -675,11 +740,17 @@ def setup_autolink_handler(app: Client):
                     thumbnail_file_id = None
 
                 try:
+                    # ✅ FIX: width, height, duration পাস করো
                     sent = await client.send_video(
                         chat_id=chat_id,
                         video=source_message.video.file_id,
                         caption=source_message.caption or "",
-                        thumb=thumbnail_file_id if thumbnail_file_id else None
+                        thumb=thumbnail_file_id if thumbnail_file_id else None,
+                        # ✅ এই তিনটি parameter না দিলে ভিডিও squished হয়
+                        width=video_meta["width"],
+                        height=video_meta["height"],
+                        duration=video_meta["duration"],
+                        supports_streaming=True,  # ✅ streaming support চালু রাখো
                     )
                     if sent is not None:
                         sent_file_id      = source_message.video.file_id
@@ -690,10 +761,15 @@ def setup_autolink_handler(app: Client):
 
                 except FileReferenceExpired:
                     try:
+                        # ✅ FIX: retry তেও metadata পাস করো
                         sent = await client.send_video(
                             chat_id=chat_id,
                             video=source_message.video.file_id,
-                            caption=source_message.caption or ""
+                            caption=source_message.caption or "",
+                            width=video_meta["width"],
+                            height=video_meta["height"],
+                            duration=video_meta["duration"],
+                            supports_streaming=True,
                         )
                         if sent is not None:
                             sent_file_id      = source_message.video.file_id
@@ -1074,6 +1150,17 @@ def setup_autolink_handler(app: Client):
                     "document"
                 )
 
+                # ✅ FIX: private link ভিডিওর জন্যও metadata extract করো
+                video_metadata = {}
+                if media_type == "video":
+                    video_metadata = extract_video_metadata(chat_message)
+                    LOGGER.info(
+                        f"[PrivateLink] Video metadata: "
+                        f"w={video_metadata['width']}, "
+                        f"h={video_metadata['height']}, "
+                        f"dur={video_metadata['duration']}s"
+                    )
+
                 try:
                     await send_media_to_saved(
                         user_client=user_client,
@@ -1084,7 +1171,11 @@ def setup_autolink_handler(app: Client):
                         caption=parsed_caption,
                         progress_message=processing_msg,
                         start_time=start_time,
-                        thumbnail_path=thumbnail_path
+                        thumbnail_path=thumbnail_path,
+                        # ✅ FIX: metadata পাস করো যাতে aspect ratio ঠিক থাকে
+                        width=video_metadata.get("width", 0),
+                        height=video_metadata.get("height", 0),
+                        duration=video_metadata.get("duration", 0),
                     )
                     if LOG_GROUP_ID and os.path.exists(media_path):
                         try:
@@ -1102,7 +1193,6 @@ def setup_autolink_handler(app: Client):
                         except Exception as e:
                             LOGGER.warning(f"[Tracker] Private log group error: {e}")
                 except AuthKeyUnregistered:
-                    # ✅ Session expired → remove in MongoDB + notify user
                     await _handle_auth_key_unregistered(user_id, session_id, bot, message)
                 except Exception as e:
                     try:
@@ -1180,7 +1270,6 @@ def setup_autolink_handler(app: Client):
                 pass
             LOGGER.error(f"Auto private DL failed for user {user_id}: {e}")
         finally:
-            # ✅ use safe_stop_client
             await safe_stop_client(user_client)
 
     # ── CALLBACKS ─────────────────────────────────────────────────────────────
