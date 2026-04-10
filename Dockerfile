@@ -48,4 +48,4 @@ ENV PORT=8000
 
 EXPOSE ${PORT}
 
-CMD ["python3", "main.py"]
+CMD ["python3", "web.py"]
