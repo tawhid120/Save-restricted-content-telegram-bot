@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 # System dependencies + Node.js 20 (required by bgutil-ytdlp-pot-provider)
 RUN apt-get update && apt-get install -y \
