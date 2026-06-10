@@ -1,651 +1,444 @@
-# Copyright @juktijol
-# Channel t.me/juktijol
-# YouTube downloader — yt-dlp powered
-# ✅ Cookies-only: ytcookies.txt দিয়ে YouTube কাজ করে!
+# ytdl_yt.py — /yt + /dl Command Handler (Pyrofork)
+#
+# Features:
+#   • /yt <link>  →  YouTube লিংক দিলে Video/Audio choice দেখাবে
+#   • /dl <link or name>  →  Video/Audio choice দেখাবে
+#   • Choice এর পর video হলে quality picker, audio হলে quality picker দেখাবে।
+#   • সব pending state yt.py-এর pending_downloads dict-এ store হয়,
+#     তাই do_video_download / do_audio_download সেখান থেকেই কাজ করে।
+#   • Auto-detect (command ছাড়া link পাঠালে) সম্পূর্ণ বন্ধ।
+#
+# __init__.py-তে import এবং setup:
+#   from .ytdl_yt import setup_ytdl_yt_handler
+#   setup_ytdl_yt_handler(app)
 
-import os
 import asyncio
-import tempfile
-import re as _re
-from time import time
-from datetime import datetime
+import os
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from pyrogram.enums import ParseMode
-from pyrogram.handlers import MessageHandler
 
-from pyleaves import Leaves
-from config import COMMAND_PREFIX
-from utils.logging_setup import LOGGER
-from utils.helper import (
-    get_readable_file_size,
-    get_readable_time,
-    get_video_thumbnail,
-    progressArgs,
-)
-from core import daily_limit, prem_plan1, prem_plan2, prem_plan3
-
-# ─── yt-dlp import ───────────────────────────────────────────────────────────
-try:
-    import yt_dlp
-    YTDLP_AVAILABLE = True
-except ImportError:
-    YTDLP_AVAILABLE = False
-    LOGGER.error("yt-dlp not installed!")
-
-# ─── Config ───────────────────────────────────────────────────────────────────
-DOWNLOAD_DIR     = os.path.join(tempfile.gettempdir(), "ytdl_downloads")
-MAX_FILE_SIZE    = 2 * 1024 * 1024 * 1024   # 2 GB (premium)
-FREE_FILE_SIZE   = 500 * 1024 * 1024         # 500 MB (free)
-FREE_DAILY_LIMIT = 5
-SESSION_EXPIRY   = 600
-STALE_FILE_AGE   = 1800
-
-# YouTube cookies file — স্ক্রিপ্টের পাশে ytcookies.txt রাখুন
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ytcookies.txt")
-
-# YouTube URL pattern
-_YT_PATTERN = _re.compile(
-    r"(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/|"
-    r"m\.youtube\.com/watch|music\.youtube\.com)"
+from .ythelpers import (
+    TEMP_DIR, MAX_DURATION, executor,
+    VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS,
+    LOGGER,
+    generate_token, youtube_parser, extract_video_id,
+    fetch_thumbnail, fetch_metadata_from_url,
+    search_youtube_url, search_youtube_metadata,
+    extract_meta_fields, build_user_info,
+    _get_available_formats,
+    build_video_quality_markup, build_audio_quality_markup,
+    resolve_video_qualities, resolve_audio_qualities,
+    format_views, format_dur,
+    clean_download, clean_temp_files,
 )
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-ytdl_sessions: dict = {}
+# yt.py-এর shared pending dict import করো — একই state ব্যবহার হবে
+from .yt import (
+    pending_downloads,
+    do_video_download,
+    do_audio_download,
+    _build_split_prompt_markup,
+    SPLIT_PROMPT_TEXT,
+)
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _build_type_choice_markup(token: str) -> InlineKeyboardMarkup:
+    """Video নাকি Audio — এই দুটো বাটন দেখাবে।"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 Video",  callback_data=f"YDLV|{token}"),
+            InlineKeyboardButton("🎵 Audio",  callback_data=f"YDLA|{token}"),
+        ],
+        [
+            InlineKeyboardButton("❌ Cancel", callback_data=f"YX|{token}"),
+        ],
+    ])
 
 
-# ─── yt-dlp options (cookies only) ──────────────────────────────────────────
+# ─── Core: show type-choice prompt ───────────────────────────────────────────
 
-def _build_ydl_opts() -> dict:
-    # ──────────────────────────────────────────────────────────────────────────
-    # 2026 YouTube client situation (yt-dlp #12482, #14627, #15793):
-    #   • web / mweb / web_creator  → SABR-only (কোনো direct URL নেই) ❌
-    #   • android                   → cookies থাকলে skip হয়           ❌
-    #   • tv_embedded               → unsupported, skip হয়             ❌
-    #   • ios                       → stable https formats দেয়         ✅
-    #   • mweb                      → cookies ছাড়া ভালো কাজ করে       ✅
-    #   • tv                        → cookies + ios এর fallback        ✅
-    # Default yt-dlp behaviour (cookies দিলে): tv,ios,web  →  ios+tv সবচেয়ে নির্ভরযোগ্য
-    # ──────────────────────────────────────────────────────────────────────────
-    opts = {
-        "quiet":               True,
-        "no_warnings":         False,
-        "noplaylist":          True,
-        "geo_bypass":          True,
-        "nocheckcertificate":  True,
-        "socket_timeout":      30,
-        "retries":             5,
-        "extractor_retries":   3,
-        "fragment_retries":    5,
-        # ✅ ios: direct https format দেয়, cookies-friendly, SABR নয়
-        # ✅ mweb: cookies ছাড়াও কাজ করে, direct https format
-        # ✅ tv: age-restricted / geo-blocked এর fallback
-        # ❌ web/android/tv_embedded বাদ — SABR/skip সমস্যার কারণে
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "mweb", "tv"],
-            }
-        },
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-                "Mobile/15E148 Safari/604.1"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        "buffersize":                    1024 * 16,
-        "concurrent_fragment_downloads": 1,
+async def _show_type_choice(client: Client, message: Message, query: str):
+    """
+    YouTube URL বা search query দিলে এই function:
+    1. URL resolve করে
+    2. Metadata fetch করে
+    3. Thumbnail সহ Video/Audio choice দেখায়
+    """
+    chat_id   = message.chat.id
+    user_info = build_user_info(message)
+
+    status = await message.reply_text("**🔍 Fetching YouTube Info...**")
+    if not status:
+        return
+
+    # URL resolve
+    video_url = youtube_parser(query)
+    if not video_url:
+        await status.edit_text("**🔍 Searching YouTube...**")
+        video_url = await search_youtube_url(query)
+        if not video_url:
+            await status.edit_text(
+                "**❌ No results found. Please check the link or try a different query.**"
+            )
+            return
+
+    await status.edit_text("**📡 Fetching Video Info...**")
+    meta = await fetch_metadata_from_url(video_url)
+    if not meta:
+        meta = await search_youtube_metadata(query)
+    if not meta:
+        await status.edit_text("**❌ Could not fetch video info. Try again.**")
+        return
+
+    title, channel, duration, view_count, safe_title = extract_meta_fields(meta)
+    video_id = extract_video_id(video_url)
+
+    token    = generate_token(message.from_user.id)
+    temp_dir = TEMP_DIR / token
+    temp_dir.mkdir(exist_ok=True)
+    thumb_out = str(temp_dir / "thumb.jpg")
+
+    await status.edit_text("**🖼️ Fetching Thumbnail...**")
+    thumb_path = await fetch_thumbnail(video_id, thumb_out)
+
+    # State save করো — video/audio উভয়ের জন্য base data
+    pending_downloads[token] = {
+        "url":        video_url,
+        "meta":       meta,
+        "user_id":    message.from_user.id,
+        "user_info":  user_info,
+        "chat_id":    chat_id,
+        "msg_id":     status.id,
+        "thumb_path": thumb_path,
     }
 
-    # ytcookies.txt থাকলে authenticate করো
-    if os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
-        LOGGER.info("[ytdl] ✅ ytcookies.txt loaded")
-    else:
-        LOGGER.warning(f"[ytdl] ⚠️ ytcookies.txt not found at: {COOKIES_FILE}")
+    caption = (
+        f"🔗 **Title:** `{title}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👁️‍🗨️ **Views:** {format_views(view_count)}\n"
+        f"⏱️ **Duration:** {format_dur(duration)}\n"
+        f"👤 **Channel:** {channel}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Select download type:**"
+    )
+    markup = _build_type_choice_markup(token)
 
-    return opts
-
-
-# ─── Cleanup ─────────────────────────────────────────────────────────────────
-
-def cleanup_stale_files():
-    now     = time()
-    cleaned = 0
     try:
-        for root, dirs, files in os.walk(DOWNLOAD_DIR):
-            for fname in files:
-                fpath = os.path.join(root, fname)
-                try:
-                    if now - os.path.getmtime(fpath) > STALE_FILE_AGE:
-                        os.remove(fpath)
-                        cleaned += 1
-                except OSError:
-                    pass
-            for dname in dirs:
-                dpath = os.path.join(root, dname)
-                try:
-                    if not os.listdir(dpath):
-                        os.rmdir(dpath)
-                except OSError:
-                    pass
-        if cleaned:
-            LOGGER.info(f"[ytdl cleanup] {cleaned} stale file(s) removed")
+        if thumb_path and os.path.exists(thumb_path):
+            await status.delete()
+            sent = await client.send_photo(
+                chat_id,
+                photo=thumb_path,
+                caption=caption,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            if sent:
+                pending_downloads[token]["msg_id"] = sent.id
+        else:
+            await status.edit_text(
+                caption,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
     except Exception as e:
-        LOGGER.warning(f"[ytdl cleanup] error: {e}")
+        LOGGER.error(f"_show_type_choice send error: {e}")
 
 
-def cleanup_expired_sessions():
-    now     = time()
-    expired = [k for k, v in ytdl_sessions.items()
-               if now - v.get("created_at", 0) > SESSION_EXPIRY]
-    for k in expired:
-        ytdl_sessions.pop(k, None)
+# ─── Command: /yt ─────────────────────────────────────────────────────────────
 
+async def _yt_command_handler(client: Client, message: Message):
+    """
+    /yt <YouTube link>
+    → লিংক দিলে Video/Audio type choice দেখাবে।
+    Auto-detect নেই — শুধু এই command দিয়েই কাজ হবে।
+    """
+    query = ""
+    parts = message.text.split(None, 1)
+    if len(parts) > 1:
+        query = parts[1].strip()
 
-cleanup_stale_files()
+    # reply থেকেও নেওয়া যাবে
+    if not query and message.reply_to_message:
+        rtm = message.reply_to_message
+        if rtm.text:
+            query = rtm.text.strip()
+        elif rtm.caption:
+            query = rtm.caption.strip()
 
-
-# ─── Error translator ────────────────────────────────────────────────────────
-
-def _friendly_error(raw_error: str) -> str:
-    err = raw_error.lower()
-    if "sign in" in err or "not a bot" in err:
-        return "🔒 YouTube bot detection। ytcookies.txt আপডেট করুন।"
-    if "age" in err and ("restrict" in err or "verif" in err):
-        return "🔞 Age-restricted ভিডিও।"
-    if "private" in err:
-        return "🔒 Private ভিডিও।"
-    if "copyright" in err or "blocked" in err:
-        return "🚫 Copyright block।"
-    if "not available" in err or "unavailable" in err:
-        return "🚫 ভিডিওটি available নয়।"
-    if "live" in err and "not supported" in err:
-        return "📺 Live stream download হয় না।"
-    if "timeout" in err:
-        return "🌐 Timeout। আবার চেষ্টা করুন।"
-    if "cookie" in err:
-        return "🍪 Cookie error। ytcookies.txt পুনরায় export করুন।"
-    clean = raw_error.replace("ERROR: ", "").strip()
-    return f"⚠️ {clean[:200]}"
-
-
-# ─── Premium check ────────────────────────────────────────────────────────────
-
-async def is_premium_user(user_id: int) -> bool:
-    current_time = datetime.utcnow()
-    for col in [prem_plan1, prem_plan2, prem_plan3]:
-        plan = await col.find_one({"user_id": user_id})
-        if plan and plan.get("expiry_date", current_time) > current_time:
-            return True
-    return False
-
-
-def normalize_url(url: str) -> str:
-    url = url.strip()
-    if url and not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
-
-
-def is_youtube_url(url: str) -> bool:
-    """শুধুমাত্র YouTube URL গ্রহণ করবে।"""
-    return bool(_YT_PATTERN.search(url))
-
-
-# ─── Video info ──────────────────────────────────────────────────────────────
-
-def get_video_info(url: str) -> tuple:
-    url        = normalize_url(url)
-    last_error = ""
-
-    # attempt 1+2: default opts (ios, mweb, tv)
-    # attempt 3:   ios-only with longer timeout (সবচেয়ে reliable single client)
-    attempt_opts_list = [
-        {**_build_ydl_opts(), "skip_download": True},
-        {**_build_ydl_opts(), "skip_download": True},
-        {
-            **_build_ydl_opts(),
-            "skip_download": True,
-            "socket_timeout": 60,
-            "extractor_args": {"youtube": {"player_client": ["ios"]}},
-        },
-    ]
-
-    for attempt, opts in enumerate(attempt_opts_list, 1):
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    LOGGER.info(f"[ytdl] Info OK (attempt {attempt}) ✅")
-                    return info, ""
-        except Exception as e:
-            last_error = str(e)
-            LOGGER.warning(f"[ytdl] Info attempt {attempt} failed: {type(e).__name__}: {str(e)[:100]}")
-
-    return None, last_error
-
-
-# ─── Download ────────────────────────────────────────────────────────────────
-
-def download_media(url: str, output_path: str, format_id: str = None,
-                   audio_only: bool = False, progress_data: dict = None) -> tuple:
-    url     = normalize_url(url)
-    outtmpl = os.path.join(output_path, "%(title).50s.%(ext)s")
-
-    def _fmt():
-        """
-        ✅ 2026 FIX: ios/mweb client webm/mp4 দুটোই দিতে পারে।
-        ext filter বাদ — শুধু quality/height দিয়ে select করো।
-        bestvideo+bestaudio → ffmpeg দিয়ে mp4 তে merge হবে।
-        """
-        if audio_only:
-            return "bestaudio[ext=m4a]/bestaudio/best"
-        if format_id and format_id != "best":
-            # specific format_id — fallback chain সহ
-            return f"{format_id}+bestaudio/{format_id}/bestvideo+bestaudio/best"
-        return (
-            "bestvideo[height<=1080]+bestaudio[ext=m4a]/"
-            "bestvideo[height<=1080]+bestaudio/"
-            "bestvideo[height<=720]+bestaudio/"
-            "best[height<=1080]/best"
+    if not query:
+        await message.reply_text(
+            "**❌ Please provide a YouTube link.**\n"
+            "**Usage:** `/yt <link>`\n\n"
+            "**Example:**\n"
+            "`/yt https://youtu.be/dQw4w9WgXcQ`"
         )
+        return
 
-    downloaded_file = []
-
-    def progress_hook(d):
-        if d["status"] == "finished":
-            downloaded_file.append(d.get("filename", ""))
-        elif d["status"] == "downloading" and progress_data is not None:
-            progress_data["downloaded"] = d.get("downloaded_bytes", 0) or 0
-            progress_data["total"]      = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            progress_data["speed"]      = d.get("speed") or 0
-            progress_data["eta"]        = d.get("eta") or 0
-
-    def _find_file():
-        if downloaded_file:
-            fp = downloaded_file[-1]
-            if audio_only and not fp.endswith(".mp3"):
-                fp = os.path.splitext(fp)[0] + ".mp3"
-            if os.path.exists(fp):
-                return fp
-        files = [os.path.join(output_path, f) for f in os.listdir(output_path)
-                 if os.path.isfile(os.path.join(output_path, f))]
-        return max(files, key=os.path.getmtime) if files else None
-
-    postprocessors     = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}] if audio_only else []
-    postprocessor_args = {} if audio_only else {"ffmpeg": ["-movflags", "+faststart"]}
-    last_error         = ""
-
-    # ─── Attempt 1: user-requested format (ios+mweb+tv clients) ─────────────
-    # ─── Attempt 2: bestvideo+bestaudio fallback ──────────────────────────────
-    # ─── Attempt 3: ios-only client, "best" format (last resort) ─────────────
-    format_attempts = [
-        (_fmt(), _build_ydl_opts()),
-        ("bestvideo+bestaudio/best", _build_ydl_opts()),
-        ("best", {
-            **_build_ydl_opts(),
-            "extractor_args": {"youtube": {"player_client": ["ios"]}},
-        }),
-    ]
-
-    for attempt, (fmt, attempt_base_opts) in enumerate(format_attempts, 1):
-        opts = {
-            **attempt_base_opts,
-            "format":              fmt,
-            "outtmpl":             outtmpl,
-            "merge_output_format": "mp4" if not audio_only else None,
-            "postprocessors":      postprocessors,
-            "postprocessor_args":  postprocessor_args,
-            "progress_hooks":      [progress_hook],
-        }
-        try:
-            downloaded_file.clear()
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
-            fp = _find_file()
-            if fp:
-                LOGGER.info(f"[ytdl] Download OK (attempt {attempt}, fmt={fmt!r}) → {fp}")
-                return True, fp
-        except Exception as e:
-            last_error = str(e)
-            LOGGER.warning(f"[ytdl] Download attempt {attempt} failed (fmt={fmt!r}): {type(e).__name__}: {str(e)[:120]}")
-
-    return False, last_error
+    LOGGER.info(f"/yt | User: {message.from_user.id} | Query: {query}")
+    await _show_type_choice(client, message, query)
 
 
-# ─── Quality keyboard ────────────────────────────────────────────────────────
+# ─── Command: /dl ─────────────────────────────────────────────────────────────
 
-def build_quality_keyboard(info: dict, chat_id: int) -> InlineKeyboardMarkup:
-    formats    = info.get("formats", [])
-    seen, rows = set(), []
-    for f in formats:
-        height = f.get("height")
-        fid    = f.get("format_id", "")
-        vcodec = f.get("vcodec", "none")
-        # ✅ FIX: ext filter সরানো হয়েছে — webm/mp4 দুটোই দেখাবে
-        if height and vcodec not in ("none", None) and height not in seen:
-            seen.add(height)
-            rows.append((height, fid))
-    rows.sort(key=lambda x: x[0], reverse=True)
+async def _dl_command_handler(client: Client, message: Message):
+    """
+    /dl <YouTube link or search query>
+    → Video/Audio type choice দেখাবে
+    """
+    query = ""
+    parts = message.text.split(None, 1)
+    if len(parts) > 1:
+        query = parts[1].strip()
 
-    buttons = []
-    for height, fid in rows[:4]:
-        label = f"🎬 {height}p HD" if height >= 720 else f"🎬 {height}p"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"ytdl_v_{chat_id}_{fid}")])
-    if not buttons:
-        buttons.append([InlineKeyboardButton("🎬 Best Quality", callback_data=f"ytdl_v_{chat_id}_best")])
-    buttons.append([InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"ytdl_a_{chat_id}")])
-    buttons.append([InlineKeyboardButton("❌ Cancel",           callback_data=f"ytdl_cancel_{chat_id}")])
-    return InlineKeyboardMarkup(buttons)
+    # reply থেকেও নেওয়া যাবে
+    if not query and message.reply_to_message:
+        rtm = message.reply_to_message
+        if rtm.text:
+            query = rtm.text.strip()
+        elif rtm.caption:
+            query = rtm.caption.strip()
 
-
-# ─── Progress updater ────────────────────────────────────────────────────────
-
-def _make_progress_bar(pct: float, length: int = 20) -> str:
-    filled = int(length * pct / 100)
-    return "▓" * filled + "░" * (length - filled)
-
-
-async def _ytdl_progress_updater(msg, progress_data: dict):
-    last_text = ""
-    while not progress_data.get("done"):
-        await asyncio.sleep(3)
-        if progress_data.get("done"):
-            break
-        dl    = progress_data.get("downloaded", 0)
-        total = progress_data.get("total", 0)
-        spd   = progress_data.get("speed", 0)
-        eta   = progress_data.get("eta", 0)
-        pct   = min((dl / total) * 100, 100) if total > 0 else 0
-        text  = (
-            f"📥 **Downloading**\n\n"
-            f"`{_make_progress_bar(pct)}`\n"
-            f"**Progress:** {pct:.2f}% | {get_readable_file_size(dl)}/{get_readable_file_size(total)}\n"
-            f"**Speed:** {get_readable_file_size(spd)}/s  "
-            f"**ETA:** {get_readable_time(int(eta)) if eta else '...'}"
+    if not query:
+        await message.reply_text(
+            "**❌ Please provide a YouTube link or video name.**\n"
+            "**Usage:** `/dl <link or name>`\n\n"
+            "**Examples:**\n"
+            "`/dl https://youtu.be/dQw4w9WgXcQ`\n"
+            "`/dl Bohemian Rhapsody Queen`"
         )
-        if text != last_text:
+        return
+
+    LOGGER.info(f"/dl | User: {message.from_user.id} | Query: {query}")
+    await _show_type_choice(client, message, query)
+
+
+# ─── Callback: user chose Video ───────────────────────────────────────────────
+
+async def _ydlv_callback(client: Client, callback_query: CallbackQuery):
+    """User 'Video' বাটনে ক্লিক করেছে — quality picker দেখাবে।"""
+    token = callback_query.data.split("|")[1]
+    data  = pending_downloads.get(token)
+
+    if not data:
+        await callback_query.answer("❌ Session expired. Please try again.", show_alert=True)
+        try:
+            await callback_query.message.edit_caption("**❌ Session expired.**")
+        except Exception:
             try:
-                await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-                last_text = text
+                await callback_query.message.edit_text("**❌ Session expired.**")
             except Exception:
                 pass
+        return
+
+    if data["user_id"] != callback_query.from_user.id:
+        await callback_query.answer("❌ This is not your session.", show_alert=True)
+        return
+
+    await callback_query.answer("🎬 Fetching video qualities...", show_alert=False)
+
+    meta                            = data["meta"]
+    title, channel, duration, view_count, _ = extract_meta_fields(meta)
+    video_url                       = data["url"]
+    chat_id                         = data["chat_id"]
+    msg_id                          = data["msg_id"]
+
+    # Format fetch
+    try:
+        await callback_query.message.edit_caption("**📡 Fetching Available Video Qualities...**")
+    except Exception:
+        try:
+            await callback_query.message.edit_text("**📡 Fetching Available Video Qualities...**")
+        except Exception:
+            pass
+
+    loop     = asyncio.get_running_loop()
+    fmt_data = await loop.run_in_executor(executor, _get_available_formats, video_url)
+    video_qualities = resolve_video_qualities(fmt_data["video_heights"])
+
+    pending_downloads[token]["video_qualities"] = video_qualities
+
+    # Long video → split prompt
+    if duration > MAX_DURATION:
+        pending_downloads[token]["split"] = True
+
+        split_caption = (
+            f"🎬 **Title:** `{title}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👁️‍🗨️ **Views:** {format_views(view_count)}\n"
+            f"**🔗 Url:** [Watch On YouTube]({video_url})\n"
+            f"⏱️ **Duration:** {format_dur(duration)}\n"
+            f"👤 **Channel:** {channel}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Bro File Size Exceeds 2 GB Limit❌**\n"
+            f"**Do You Want Spilted Downloader⬇️?**\n"
+            f"**Click Below Buttons For Navigation**"
+        )
+        markup = _build_split_prompt_markup(token, "YSPV")
+        try:
+            await callback_query.message.edit_caption(split_caption, reply_markup=markup)
+        except Exception:
+            try:
+                await callback_query.message.edit_text(
+                    split_caption, reply_markup=markup, disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+        return
+
+    caption = (
+        f"🎬 **Title:** `{title}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👁️‍🗨️ **Views:** {format_views(view_count)}\n"
+        f"**🔗 Url:** [Watch On YouTube]({video_url})\n"
+        f"⏱️ **Duration:** {format_dur(duration)}\n"
+        f"👤 **Channel:** {channel}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Select video quality to download:**"
+    )
+    markup = build_video_quality_markup(token, video_qualities, cb_prefix="YV")
+
+    try:
+        await callback_query.message.edit_caption(caption, reply_markup=markup)
+    except Exception:
+        try:
+            await callback_query.message.edit_text(
+                caption, reply_markup=markup, disable_web_page_preview=True
+            )
+        except Exception:
+            pass
 
 
-# ─── Handler ─────────────────────────────────────────────────────────────────
+# ─── Callback: user chose Audio ───────────────────────────────────────────────
+
+async def _ydla_callback(client: Client, callback_query: CallbackQuery):
+    """User 'Audio' বাটনে ক্লিক করেছে — quality picker দেখাবে।"""
+    token = callback_query.data.split("|")[1]
+    data  = pending_downloads.get(token)
+
+    if not data:
+        await callback_query.answer("❌ Session expired. Please try again.", show_alert=True)
+        try:
+            await callback_query.message.edit_caption("**❌ Session expired.**")
+        except Exception:
+            try:
+                await callback_query.message.edit_text("**❌ Session expired.**")
+            except Exception:
+                pass
+        return
+
+    if data["user_id"] != callback_query.from_user.id:
+        await callback_query.answer("❌ This is not your session.", show_alert=True)
+        return
+
+    await callback_query.answer("🎵 Fetching audio qualities...", show_alert=False)
+
+    meta                            = data["meta"]
+    title, channel, duration, view_count, _ = extract_meta_fields(meta)
+    video_url                       = data["url"]
+
+    try:
+        await callback_query.message.edit_caption("**📡 Fetching Available Audio Qualities...**")
+    except Exception:
+        try:
+            await callback_query.message.edit_text("**📡 Fetching Available Audio Qualities...**")
+        except Exception:
+            pass
+
+    loop     = asyncio.get_running_loop()
+    fmt_data = await loop.run_in_executor(executor, _get_available_formats, video_url)
+    audio_qualities = resolve_audio_qualities(fmt_data["audio_abrs"])
+
+    pending_downloads[token]["audio_qualities"] = audio_qualities
+
+    # Long audio → split prompt
+    if duration > MAX_DURATION:
+        pending_downloads[token]["split"] = True
+
+        split_caption = (
+            f"🎵 **Title:** `{title}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👁️‍🗨️ **Views:** {format_views(view_count)}\n"
+            f"**🔗 Url:** [Listen On YouTube]({video_url})\n"
+            f"⏱️ **Duration:** {format_dur(duration)}\n"
+            f"👤 **Channel:** {channel}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Bro File Size Exceeds 2 GB Limit❌**\n"
+            f"**Do You Want Spilted Downloader⬇️?**\n"
+            f"**Click Below Buttons For Navigation**"
+        )
+        markup = _build_split_prompt_markup(token, "YSPA")
+        try:
+            await callback_query.message.edit_caption(split_caption, reply_markup=markup)
+        except Exception:
+            try:
+                await callback_query.message.edit_text(
+                    split_caption, reply_markup=markup, disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+        return
+
+    caption = (
+        f"🎵 **Title:** `{title}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👁️‍🗨️ **Views:** {format_views(view_count)}\n"
+        f"**🔗 Url:** [Listen On YouTube]({video_url})\n"
+        f"⏱️ **Duration:** {format_dur(duration)}\n"
+        f"👤 **Channel:** {channel}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Select audio quality to download:**"
+    )
+    markup = build_audio_quality_markup(token, audio_qualities, cb_prefix="YA")
+
+    try:
+        await callback_query.message.edit_caption(caption, reply_markup=markup)
+    except Exception:
+        try:
+            await callback_query.message.edit_text(
+                caption, reply_markup=markup, disable_web_page_preview=True
+            )
+        except Exception:
+            pass
+
+
+# ─── Setup function ───────────────────────────────────────────────────────────
 
 def setup_ytdl_yt_handler(app: Client):
+    """
+    __init__.py থেকে call হয়:
+        from .ytdl_yt import setup_ytdl_yt_handler
+        setup_ytdl_yt_handler(app)
+    """
 
-    async def ytdl_command(client: Client, message: Message):
-        user_id = message.from_user.id
+    # /yt command — group=0 (normal priority)
+    app.on_message(
+        filters.command(["yt"], prefixes=["/", "!", "."]),
+        group=0,
+    )(_yt_command_handler)
 
-        if not YTDLP_AVAILABLE:
-            await message.reply_text("❌ **yt-dlp ইনস্টল নেই!**", parse_mode=ParseMode.MARKDOWN)
-            return
+    # /dl command — group=0 (normal priority)
+    app.on_message(
+        filters.command(["dl"], prefixes=["/", "!", "."]),
+        group=0,
+    )(_dl_command_handler)
 
-        if len(message.command) < 2:
-            await message.reply_text(
-                "🎬 **YouTube Downloader**\n\n"
-                "**Usage:** `/yt <YouTube URL>`\n\n"
-                "**Supported:** YouTube ভিডিও, Shorts, Live এবং YouTube Music!\n\n"
-                "**Example:** `/yt https://youtu.be/xxxxx`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
+    # Callback: Video choice
+    app.on_callback_query(
+        filters.regex(r"^YDLV\|"),
+    )(_ydlv_callback)
 
-        text_parts = message.text.split(None, 1)
-        url        = text_parts[1].strip() if len(text_parts) > 1 else ""
-        if not url:
-            await message.reply_text("**Usage:** `/yt <YouTube URL>`", parse_mode=ParseMode.MARKDOWN)
-            return
+    # Callback: Audio choice
+    app.on_callback_query(
+        filters.regex(r"^YDLA\|"),
+    )(_ydla_callback)
 
-        # YouTube URL যাচাই
-        if not is_youtube_url(normalize_url(url)):
-            await message.reply_text(
-                "❌ **শুধুমাত্র YouTube লিঙ্ক গ্রহণযোগ্য!**\n\n"
-                "সঠিক URL দিন যেমন: `https://youtu.be/xxxxx`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-
-        is_premium = await is_premium_user(user_id)
-        if not is_premium:
-            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            rec   = await daily_limit.find_one({"user_id": user_id})
-            ytdl_count = 0
-            if rec and rec.get("date") and rec["date"] >= today:
-                ytdl_count = rec.get("ytdl_downloads", 0)
-            if ytdl_count >= FREE_DAILY_LIMIT:
-                await message.reply_text(
-                    f"🚫 **Daily limit reached!** (Free: {FREE_DAILY_LIMIT}/day)\nUpgrade: /plans",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-
-        # cookies ফাইল আছে কিনা জানিয়ে দাও
-        cookie_status = "🍪 Cookies active" if os.path.exists(COOKIES_FILE) else "⚠️ No cookies"
-        status_msg = await message.reply_text(
-            f"🔍 **Analyzing...**\n_{cookie_status}_",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        loop              = asyncio.get_event_loop()
-        info, error_msg   = await loop.run_in_executor(None, get_video_info, url)
-
-        if not info:
-            await status_msg.edit_text(
-                f"❌ **Download failed!**\n\n{_friendly_error(error_msg) if error_msg else 'Unknown error'}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-
-        title        = (info.get("title", "Unknown") or "Unknown")[:60]
-        duration     = info.get("duration", 0) or 0
-        uploader     = info.get("uploader", "Unknown") or "Unknown"
-        duration_str = get_readable_time(int(duration)) if duration else "Unknown"
-
-        cleanup_expired_sessions()
-        ytdl_sessions[message.chat.id] = {
-            "user_id":    user_id,
-            "url":        url,
-            "info":       info,
-            "message_id": message.id,
-            "created_at": time(),
-        }
-
-        await status_msg.edit_text(
-            f"📹 **{title}**\n\n"
-            f"👤 **Channel:** {uploader}\n"
-            f"⏱ **Duration:** {duration_str}\n\n"
-            f"👇 **Quality বেছে নিন:**",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=build_quality_keyboard(info, message.chat.id),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^ytdl_(v|a|cancel)_"))
-    async def ytdl_callback(client, callback_query):
-        data    = callback_query.data
-        chat_id = callback_query.message.chat.id
-        user_id = callback_query.from_user.id
-
-        session = ytdl_sessions.get(chat_id)
-        if not session or session["user_id"] != user_id:
-            await callback_query.answer("❌ Session expired!", show_alert=True)
-            return
-
-        if data.startswith("ytdl_cancel_"):
-            await callback_query.message.edit_text("❌ **Cancelled.**", parse_mode=ParseMode.MARKDOWN)
-            ytdl_sessions.pop(chat_id, None)
-            await callback_query.answer()
-            return
-
-        url       = session["url"]
-        is_audio  = data.startswith("ytdl_a_")
-        format_id = None
-        if data.startswith("ytdl_v_"):
-            prefix    = f"ytdl_v_{chat_id}_"
-            format_id = data[len(prefix):] if data.startswith(prefix) else None
-            if format_id == "best":
-                format_id = None
-
-        await callback_query.answer("⏳ শুরু হচ্ছে...")
-
-        is_premium = await is_premium_user(user_id)
-        today      = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        if not is_premium:
-            rec        = await daily_limit.find_one({"user_id": user_id})
-            ytdl_count = 0
-            if rec and rec.get("date") and rec["date"] >= today:
-                ytdl_count = rec.get("ytdl_downloads", 0)
-            await daily_limit.update_one(
-                {"user_id": user_id},
-                {"$set": {"ytdl_downloads": ytdl_count + 1, "date": today},
-                 "$inc": {"total_downloads": 1}},
-                upsert=True,
-            )
-        else:
-            await daily_limit.update_one(
-                {"user_id": user_id}, {"$inc": {"total_downloads": 1}}, upsert=True
-            )
-
-        await callback_query.message.edit_text(
-            "📥 **Downloading...**\n_🍪 Cookie authentication_",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        cleanup_stale_files()
-        user_dir = os.path.join(DOWNLOAD_DIR, str(user_id))
-        os.makedirs(user_dir, exist_ok=True)
-
-        loop          = asyncio.get_event_loop()
-        overall_start = time()
-
-        progress_data = {"downloaded": 0, "total": 0, "speed": 0, "eta": 0, "done": False}
-        progress_task = asyncio.create_task(
-            _ytdl_progress_updater(callback_query.message, progress_data)
-        )
-        try:
-            success, result = await loop.run_in_executor(
-                None, download_media, url, user_dir, format_id, is_audio, progress_data
-            )
-        finally:
-            progress_data["done"] = True
-            try:
-                await progress_task
-            except Exception:
-                pass
-
-        if not success:
-            await callback_query.message.edit_text(
-                f"❌ **Download failed!**\n\n{_friendly_error(result)}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            ytdl_sessions.pop(chat_id, None)
-            return
-
-        filepath  = result
-        file_size = os.path.getsize(filepath)
-        max_size  = MAX_FILE_SIZE if is_premium else FREE_FILE_SIZE
-
-        if file_size > max_size:
-            os.remove(filepath)
-            await callback_query.message.edit_text(
-                f"❌ **File অনেক বড়!**\n"
-                f"📦 `{get_readable_file_size(file_size)}` / Limit: `{get_readable_file_size(max_size)}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            ytdl_sessions.pop(chat_id, None)
-            return
-
-        await callback_query.message.edit_text(
-            f"📤 **Uploading...**\n📦 `{get_readable_file_size(file_size)}`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        try:
-            info        = session.get("info", {})
-            title       = (info.get("title") or "Downloaded Video")
-            short_title = title[:50]
-            uploader    = info.get("uploader") or info.get("channel") or ""
-            yt_url      = info.get("webpage_url") or session.get("url", "")
-
-            # ─── Telegram caption — ভিডিও টাইটেল সহ ───────────────────────
-            caption = (
-                f"🎬 **{short_title}**\n"
-                + (f"👤 {uploader}\n" if uploader else "")
-                + (f"🔗 [YouTube Link]({yt_url})\n" if yt_url else "")
-                + f"\n📥 Downloaded by @juktijol Bot"
-            )
-
-            duration = int(info.get("duration", 0) or 0)
-            start_t  = time()
-
-            if is_audio or filepath.endswith(".mp3"):
-                await client.send_audio(
-                    chat_id=chat_id,
-                    audio=filepath,
-                    caption=caption,
-                    duration=duration,
-                    title=short_title,
-                    parse_mode=ParseMode.MARKDOWN,
-                    progress=Leaves.progress_for_pyrogram,
-                    progress_args=progressArgs("📤 Uploading", callback_query.message, start_t),
-                )
-            else:
-                thumb_path = None
-                try:
-                    thumb_path = await get_video_thumbnail(filepath, duration)
-                except Exception:
-                    pass
-                try:
-                    await client.send_video(
-                        chat_id=chat_id,
-                        video=filepath,
-                        caption=caption,
-                        duration=duration,
-                        thumb=thumb_path,
-                        parse_mode=ParseMode.MARKDOWN,
-                        supports_streaming=True,
-                        progress=Leaves.progress_for_pyrogram,
-                        progress_args=progressArgs("📤 Uploading", callback_query.message, start_t),
-                    )
-                finally:
-                    if thumb_path and os.path.exists(thumb_path):
-                        os.remove(thumb_path)
-
-            elapsed = get_readable_time(int(time() - overall_start))
-            await callback_query.message.edit_text(
-                f"✅ **সফল!**\n"
-                f"🎬 `{short_title}`\n"
-                f"⏱ `{elapsed}` | 📦 `{get_readable_file_size(file_size)}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-
-        except Exception as e:
-            LOGGER.error(f"ytdl upload error: {e}")
-            await callback_query.message.edit_text(
-                f"❌ **Upload failed!**\n`{str(e)[:200]}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        finally:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            try:
-                if not os.listdir(user_dir):
-                    os.rmdir(user_dir)
-            except Exception:
-                pass
-            ytdl_sessions.pop(chat_id, None)
-
-    app.add_handler(
-        MessageHandler(
-            ytdl_command,
-            filters=filters.command("yt", prefixes=COMMAND_PREFIX)
-                    & (filters.private | filters.group),
-        ),
-        group=1,
-    )
+    LOGGER.info("ytdl_yt handlers registered (group=0 /yt, group=0 /dl, YDLV/YDLA callbacks)")
