@@ -60,7 +60,7 @@ ytdl_sessions: dict = {}
 def _build_ydl_opts() -> dict:
     opts = {
         "quiet":               True,
-        "no_warnings":         True,
+        "no_warnings":         False,   # warning দেখলে debug সহজ হয়
         "noplaylist":          True,
         "geo_bypass":          True,
         "nocheckcertificate":  True,
@@ -68,6 +68,16 @@ def _build_ydl_opts() -> dict:
         "retries":             5,
         "extractor_retries":   3,
         "fragment_retries":    5,
+        # ✅ FIX: missing PO token format গুলো enable করে — "format not available" এরর ঠেকায়
+        "extractor_args": {
+            "youtube": {
+                "formats": ["missing_pot"],
+                # ✅ android ও tv_embedded client সরাসরি format দেয়, cookies-friendly
+                "player_client": ["web", "android", "tv_embedded"],
+            }
+        },
+        # ✅ FIX: যে format সত্যিই available সেটা select করে, unavailable skip করে
+        "check_formats":       "selected",
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -207,14 +217,20 @@ def download_media(url: str, output_path: str, format_id: str = None,
     outtmpl = os.path.join(output_path, "%(title).50s.%(ext)s")
 
     def _fmt():
+        """
+        ✅ FIX: ext=mp4/m4a বাদ দেওয়া হয়েছে — YouTube এখন webm/opus দেয়,
+        ext দিলে "format not available" আসে।
+        bestvideo+bestaudio → ffmpeg দিয়ে mp4 তে merge হবে।
+        """
         if audio_only:
             return "bestaudio/best"
         if format_id and format_id != "best":
-            return f"{format_id}+bestaudio/best"
+            # ✅ specific format_id হলে fallback chain রাখো
+            return f"{format_id}+bestaudio/{format_id}/bestvideo+bestaudio/best"
         return (
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
             "bestvideo[height<=1080]+bestaudio/"
-            "best[height<=1080][ext=mp4]/best[height<=1080]/best"
+            "bestvideo[height<=720]+bestaudio/"
+            "best[height<=1080]/best"
         )
 
     downloaded_file = []
@@ -243,10 +259,15 @@ def download_media(url: str, output_path: str, format_id: str = None,
     postprocessor_args = {} if audio_only else {"ffmpeg": ["-movflags", "+faststart"]}
     last_error         = ""
 
-    for attempt in range(1, 4):
+    # ─── Attempt 1: user-requested format ────────────────────────────────────
+    # ─── Attempt 2: fallback to bestvideo+bestaudio ──────────────────────────
+    # ─── Attempt 3: last resort — "best" ─────────────────────────────────────
+    format_attempts = [_fmt(), "bestvideo+bestaudio/best", "best"]
+
+    for attempt, fmt in enumerate(format_attempts, 1):
         opts = {
             **_build_ydl_opts(),
-            "format":              "bestaudio/best" if (audio_only or attempt == 2) else _fmt(),
+            "format":              fmt,
             "outtmpl":             outtmpl,
             "merge_output_format": "mp4" if not audio_only else None,
             "postprocessors":      postprocessors,
@@ -259,11 +280,11 @@ def download_media(url: str, output_path: str, format_id: str = None,
                 ydl.extract_info(url, download=True)
             fp = _find_file()
             if fp:
-                LOGGER.info(f"[ytdl] Download OK (attempt {attempt}) → {fp}")
+                LOGGER.info(f"[ytdl] Download OK (attempt {attempt}, fmt={fmt!r}) → {fp}")
                 return True, fp
         except Exception as e:
             last_error = str(e)
-            LOGGER.warning(f"[ytdl] Download attempt {attempt} failed: {type(e).__name__}: {str(e)[:100]}")
+            LOGGER.warning(f"[ytdl] Download attempt {attempt} failed (fmt={fmt!r}): {type(e).__name__}: {str(e)[:120]}")
 
     return False, last_error
 
@@ -277,8 +298,8 @@ def build_quality_keyboard(info: dict, chat_id: int) -> InlineKeyboardMarkup:
         height = f.get("height")
         fid    = f.get("format_id", "")
         vcodec = f.get("vcodec", "none")
-        ext    = f.get("ext", "")
-        if height and vcodec != "none" and height not in seen and ext in ("mp4", "webm", ""):
+        # ✅ FIX: ext filter সরানো হয়েছে — webm/mp4 দুটোই দেখাবে
+        if height and vcodec not in ("none", None) and height not in seen:
             seen.add(height)
             rows.append((height, fid))
     rows.sort(key=lambda x: x[0], reverse=True)
