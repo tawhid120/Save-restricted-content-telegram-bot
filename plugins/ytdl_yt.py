@@ -58,9 +58,19 @@ ytdl_sessions: dict = {}
 # ─── yt-dlp options (cookies only) ──────────────────────────────────────────
 
 def _build_ydl_opts() -> dict:
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2026 YouTube client situation (yt-dlp #12482, #14627, #15793):
+    #   • web / mweb / web_creator  → SABR-only (কোনো direct URL নেই) ❌
+    #   • android                   → cookies থাকলে skip হয়           ❌
+    #   • tv_embedded               → unsupported, skip হয়             ❌
+    #   • ios                       → stable https formats দেয়         ✅
+    #   • mweb                      → cookies ছাড়া ভালো কাজ করে       ✅
+    #   • tv                        → cookies + ios এর fallback        ✅
+    # Default yt-dlp behaviour (cookies দিলে): tv,ios,web  →  ios+tv সবচেয়ে নির্ভরযোগ্য
+    # ──────────────────────────────────────────────────────────────────────────
     opts = {
         "quiet":               True,
-        "no_warnings":         False,   # warning দেখলে debug সহজ হয়
+        "no_warnings":         False,
         "noplaylist":          True,
         "geo_bypass":          True,
         "nocheckcertificate":  True,
@@ -68,21 +78,20 @@ def _build_ydl_opts() -> dict:
         "retries":             5,
         "extractor_retries":   3,
         "fragment_retries":    5,
-        # ✅ FIX: missing PO token format গুলো enable করে — "format not available" এরর ঠেকায়
+        # ✅ ios: direct https format দেয়, cookies-friendly, SABR নয়
+        # ✅ mweb: cookies ছাড়াও কাজ করে, direct https format
+        # ✅ tv: age-restricted / geo-blocked এর fallback
+        # ❌ web/android/tv_embedded বাদ — SABR/skip সমস্যার কারণে
         "extractor_args": {
             "youtube": {
-                "formats": ["missing_pot"],
-                # ✅ android ও tv_embedded client সরাসরি format দেয়, cookies-friendly
-                "player_client": ["web", "android", "tv_embedded"],
+                "player_client": ["ios", "mweb", "tv"],
             }
         },
-        # ✅ FIX: যে format সত্যিই available সেটা select করে, unavailable skip করে
-        "check_formats":       "selected",
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+                "Mobile/15E148 Safari/604.1"
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
@@ -191,11 +200,21 @@ def is_youtube_url(url: str) -> bool:
 def get_video_info(url: str) -> tuple:
     url        = normalize_url(url)
     last_error = ""
-    opts       = {**_build_ydl_opts(), "skip_download": True}
 
-    for attempt in range(1, 4):
-        if attempt == 3:
-            opts["socket_timeout"] = 60
+    # attempt 1+2: default opts (ios, mweb, tv)
+    # attempt 3:   ios-only with longer timeout (সবচেয়ে reliable single client)
+    attempt_opts_list = [
+        {**_build_ydl_opts(), "skip_download": True},
+        {**_build_ydl_opts(), "skip_download": True},
+        {
+            **_build_ydl_opts(),
+            "skip_download": True,
+            "socket_timeout": 60,
+            "extractor_args": {"youtube": {"player_client": ["ios"]}},
+        },
+    ]
+
+    for attempt, opts in enumerate(attempt_opts_list, 1):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -218,16 +237,17 @@ def download_media(url: str, output_path: str, format_id: str = None,
 
     def _fmt():
         """
-        ✅ FIX: ext=mp4/m4a বাদ দেওয়া হয়েছে — YouTube এখন webm/opus দেয়,
-        ext দিলে "format not available" আসে।
+        ✅ 2026 FIX: ios/mweb client webm/mp4 দুটোই দিতে পারে।
+        ext filter বাদ — শুধু quality/height দিয়ে select করো।
         bestvideo+bestaudio → ffmpeg দিয়ে mp4 তে merge হবে।
         """
         if audio_only:
-            return "bestaudio/best"
+            return "bestaudio[ext=m4a]/bestaudio/best"
         if format_id and format_id != "best":
-            # ✅ specific format_id হলে fallback chain রাখো
+            # specific format_id — fallback chain সহ
             return f"{format_id}+bestaudio/{format_id}/bestvideo+bestaudio/best"
         return (
+            "bestvideo[height<=1080]+bestaudio[ext=m4a]/"
             "bestvideo[height<=1080]+bestaudio/"
             "bestvideo[height<=720]+bestaudio/"
             "best[height<=1080]/best"
@@ -259,14 +279,21 @@ def download_media(url: str, output_path: str, format_id: str = None,
     postprocessor_args = {} if audio_only else {"ffmpeg": ["-movflags", "+faststart"]}
     last_error         = ""
 
-    # ─── Attempt 1: user-requested format ────────────────────────────────────
-    # ─── Attempt 2: fallback to bestvideo+bestaudio ──────────────────────────
-    # ─── Attempt 3: last resort — "best" ─────────────────────────────────────
-    format_attempts = [_fmt(), "bestvideo+bestaudio/best", "best"]
-
-    for attempt, fmt in enumerate(format_attempts, 1):
-        opts = {
+    # ─── Attempt 1: user-requested format (ios+mweb+tv clients) ─────────────
+    # ─── Attempt 2: bestvideo+bestaudio fallback ──────────────────────────────
+    # ─── Attempt 3: ios-only client, "best" format (last resort) ─────────────
+    format_attempts = [
+        (_fmt(), _build_ydl_opts()),
+        ("bestvideo+bestaudio/best", _build_ydl_opts()),
+        ("best", {
             **_build_ydl_opts(),
+            "extractor_args": {"youtube": {"player_client": ["ios"]}},
+        }),
+    ]
+
+    for attempt, (fmt, attempt_base_opts) in enumerate(format_attempts, 1):
+        opts = {
+            **attempt_base_opts,
             "format":              fmt,
             "outtmpl":             outtmpl,
             "merge_output_format": "mp4" if not audio_only else None,
