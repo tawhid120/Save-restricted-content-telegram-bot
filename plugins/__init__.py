@@ -15,7 +15,7 @@ from .referral import setup_referral_handler
 from .gdl import setup_gdl_handler
 from .directdl import setup_directdl_handler
 from .fbdl import setup_fbdl_handler
-from .ytdl_yt import setup_ytdl_yt_handle
+
 
 def setup_plugins_handlers(app):
     setup_plan_handler(app)
@@ -27,7 +27,6 @@ def setup_plugins_handlers(app):
     setup_login_handler(app)
     setup_pbatch_handler(app)
     setup_ytdl_handler(app)
-    setup_ytdl_yt_handler(app)
     setup_ytupload_handler(app)
     setup_refresh_handler(app)
     setup_settings_handler(app)
