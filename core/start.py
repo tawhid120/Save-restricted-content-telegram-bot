@@ -74,7 +74,6 @@ def setup_start_handler(app: Client):
 
 👇 **Just paste your Telegram link below to start:**
 """
-"""
 
         await message.reply_text(
             start_message,
