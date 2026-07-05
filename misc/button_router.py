@@ -1,6 +1,7 @@
 # Copyright @juktijol
 # Channel t.me/juktijol
-# UPDATED: New button labels, English UI, fixed italic markdown, new thumb flow
+# UPDATED: Removed website video download & single link download features,
+# new button labels, new layout, English UI, fixed italic markdown
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,15 +18,6 @@ def setup_button_router(app: Client):
     _button_labels = set(BUTTON_COMMAND_MAP.keys())
 
     _hints: dict[str, str] = {
-        "autolink": (
-            "🔗 **Single Link Download**\n\n"
-            "No command needed! ⚡\n\n"
-            "Just paste a Telegram link in the chat:\n"
-            "• `https://t.me/channelname/123` → public channel\n"
-            "• `https://t.me/c/1234567890/123` → private channel "
-            "__(need to /login first)__\n\n"
-            "The bot will detect the link and download it for you. ✅"
-        ),
         "autobatch": (
             "📦 **Batch Download**\n\n"
             "Download many files at once! 🎯\n\n"
@@ -36,23 +28,8 @@ def setup_button_router(app: Client):
             "Send the link → the bot will ask how many files you want. 🚀\n\n"
             "__Premium users only. Higher plans = more files per batch.__"
         ),
-        "ytdl": (
-            "🌐 **Website Video Download**\n\n"
-            "**How to use:** `/ytdl <link>`\n\n"
-            "**Works with:**\n"
-            "• YouTube 🎥\n"
-            "• Instagram 📸\n"
-            "• TikTok 🎵\n"
-            "• Twitter / X 🐦\n"
-            "• Facebook 📘\n"
-            "• Vimeo, Dailymotion, Twitch\n"
-            "• SoundCloud, Reddit, Bilibili\n"
-            "• And **1000+** more sites!\n\n"
-            "**Example:**\n"
-            "`/ytdl https://youtube.com/watch?v=xxxxx`"
-        ),
         "setthumb": (
-            "📌 **Set Thumbnail**\n\n"
+            "🖼 **Set Thumbnail**\n\n"
             "Super easy — just 2 steps! 👇\n\n"
             "**Step 1:** Type `/setthumb`\n"
             "**Step 2:** Send a photo when the bot asks\n\n"
@@ -60,18 +37,13 @@ def setup_button_router(app: Client):
             "__Or just send any photo — the bot will ask if you want to set it as a thumbnail!__"
         ),
         "transfer": (
-            "🔄 **Transfer Premium**\n\n"
+            "💫 **Transfer Premium**\n\n"
             "Want to give your premium to a friend? 🎁\n\n"
             "**How to use:**\n"
             "`/transfer <user_id>` or `/transfer @username`\n\n"
             "⚠️ This cannot be undone — your premium will be removed."
         ),
     }
-
-    def _autolink_buttons() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")],
-        ])
 
     def _plan_buttons() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -80,7 +52,7 @@ def setup_button_router(app: Client):
                 InlineKeyboardButton("🌟 Plan 2 — 500 ⭐", callback_data="plan_select_plan2"),
             ],
             [InlineKeyboardButton("💎 Plan 3 — 1000 ⭐", callback_data="plan_select_plan3")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")],
+            [InlineKeyboardButton("🏡 Home", callback_data="menu_home")],
         ])
 
     @app.on_message(
@@ -106,14 +78,10 @@ def setup_button_router(app: Client):
             f"label='{label}' → command='{command}'"
         )
 
-        # ── autolink / setthumb / transfer / ytdl ──────────────────────────
-        if command in ("autolink", "setthumb", "transfer", "ytdl"):
+        # ── setthumb / transfer ─────────────────────────────────────────────
+        if command in ("setthumb", "transfer"):
             hint = _hints.get(command, "Send a link to use this feature.")
-            if command == "autolink":
-                await message.reply_text(hint, parse_mode=ParseMode.MARKDOWN,
-                                         reply_markup=_autolink_buttons())
-            else:
-                await message.reply_text(hint, parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(hint, parse_mode=ParseMode.MARKDOWN)
             return
 
         # ── referral ────────────────────────────────────────────────────────
@@ -139,14 +107,14 @@ def setup_button_router(app: Client):
             )
             return
 
-        # ── start / back ────────────────────────────────────────────────────
+        # ── start / home ────────────────────────────────────────────────────
         if command == "start":
             user_fullname = (
                 f"{message.from_user.first_name} "
                 f"{message.from_user.last_name or ''}".strip()
             )
             await message.reply_text(
-                f"🏠 **Main Menu** — Hey {user_fullname}!\n\nChoose an option below 👇",
+                f"🏡 **Main Menu** — Hey {user_fullname}!\n\nChoose an option below 👇",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=get_start_inline(),
                 disable_web_page_preview=True,
@@ -157,7 +125,6 @@ def setup_button_router(app: Client):
             await message.reply_text(
                 "**❓ Help Menu**\n"
                 "━━━━━━━━━━━━━━━━\n"
-                "**🔗 Auto Download:** Paste any Telegram link!\n"
                 "**📦 Auto Batch:** Send a link → pick how many files to download.\n"
                 "**⚙️ Settings:** /settings — set caption, rename, word filter, target chat.\n"
                 "━━━━━━━━━━━━━━━━\n"
@@ -247,7 +214,7 @@ def setup_button_router(app: Client):
 
             await message.reply_text(
                 f"<b>━━━━━━━━━━━━━━━━</b>\n"
-                f"<b>👤 My Profile</b>\n"
+                f"<b>🧾 My Profile</b>\n"
                 f"<b>━━━━━━━━━━━━━━━━</b>\n"
                 f"<b>🆔 ID:</b> <code>{user_id}</code>\n"
                 f"<b>👤 Name:</b> <code>{full_name}</code>\n"
@@ -275,7 +242,7 @@ def setup_button_router(app: Client):
                     photo=thumb_path,
                     caption=(
                         "🖼 **Your current thumbnail**\n\n"
-                        "🗑 Remove it: `/rmthumb`\n"
+                        "♻️ Remove it: `/rmthumb`\n"
                         "🔄 Change it: `/setthumb`"
                     ),
                     parse_mode=ParseMode.MARKDOWN,
@@ -283,7 +250,7 @@ def setup_button_router(app: Client):
             else:
                 await message.reply_text(
                     "❌ **You don't have a thumbnail set yet.**\n\n"
-                    "📌 **How to set one — super easy!**\n"
+                    "🖼 **How to set one — super easy!**\n"
                     "**Step 1:** Type `/setthumb`\n"
                     "**Step 2:** Send a photo when the bot asks\n\n"
                     "__Or just send any photo — the bot will ask if you want to set it!__",
@@ -318,7 +285,7 @@ def setup_button_router(app: Client):
         # ── login ──────────────────────────────────────────────────────────────
         elif command == "login":
             await message.reply_text(
-                "🔐 **Type `/login` to connect your Telegram account.**\n\n"
+                "🔑 **Type `/login` to connect your Telegram account.**\n\n"
                 "__You'll need to login to download from private channels.__",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -348,7 +315,7 @@ def setup_button_router(app: Client):
             f"{message.from_user.last_name or ''}".strip()
         )
         await message.reply_text(
-            f"🏠 **Main Menu** — Hey {user_fullname}!\n\nChoose an option below 👇",
+            f"🏡 **Main Menu** — Hey {user_fullname}!\n\nChoose an option below 👇",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=get_start_inline(),
             disable_web_page_preview=True,

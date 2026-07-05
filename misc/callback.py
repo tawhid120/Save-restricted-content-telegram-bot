@@ -22,18 +22,6 @@ HOME_TEXT = """🚀 **RestrictedContentDL Bot**
 
 Just paste a link below 👇"""
 
-AUTOLINK_GUIDE_TEXT = """🔗 **Single Link Download**
-
-No command needed — just paste a link! ⚡
-
-• `https://t.me/channelname/123` → public channel
-• `https://t.me/c/1234567890/123` → private channel __(need to /login first)__
-
-The bot will find and send the file to you. ✅
-
-⏱ Free users: wait 5 minutes between downloads.
-💎 Premium users: instant & unlimited!"""
-
 AUTOBATCH_GUIDE_TEXT = """📦 **Batch Download**
 
 Want to download many files at once? Easy! 🎯
@@ -50,7 +38,7 @@ The bot will ask how many files you want. Done! 🚀
 
 __Batch download is for premium users only.__"""
 
-GUIDE_SETTHUMB_TEXT = """📌 **How to Set a Thumbnail**
+GUIDE_SETTHUMB_TEXT = """🖼 **How to Set a Thumbnail**
 
 Super easy — just 2 steps! 👇
 
@@ -65,11 +53,11 @@ THUMB_MENU_TEXT = """🖼 **Thumbnail Settings**
 
 A thumbnail is the small preview image shown on videos. 🎬
 
-• **📌 Set Thumbnail** — pick a new photo to use
-• **👁 View Thumbnail** — see your current thumbnail
-• **🗑 Remove Thumbnail** — go back to no thumbnail"""
+• **🖼 Set Thumbnail** — pick a new photo to use
+• **👀 View Thumbnail** — see your current thumbnail
+• **♻️ Remove Thumbnail** — go back to no thumbnail"""
 
-LOGIN_MENU_TEXT = """🔐 **Login / Logout**
+LOGIN_MENU_TEXT = """🔑 **Login / Logout**
 
 **Why login?** To download from private channels! 🔒
 
@@ -79,9 +67,6 @@ LOGIN_MENU_TEXT = """🔐 **Login / Logout**
 __All users (free & premium) can login.__"""
 
 HELP_TEXT = """❓ **Help & Commands**
-
-**🔗 Auto Download**
-Just paste any Telegram link — no command needed!
 
 **📦 Auto Batch**
 Send a link → bot asks how many files → done!
@@ -106,14 +91,14 @@ Send a link → bot asks how many files → done!
 • /transfer — give your premium to a friend
 • /referral — share your link & earn rewards"""
 
-PROFILE_TEXT = """👤 **My Profile**
+PROFILE_TEXT = """🧾 **My Profile**
 
 See your plan, downloads, and account info.
 
 • /profile — quick overview
 • /info — full details"""
 
-ACTION_LOGIN_TEXT = """🔐 **How to Login**
+ACTION_LOGIN_TEXT = """🔑 **How to Login**
 
 Just type `/login` and follow the steps! 👇
 
@@ -127,17 +112,17 @@ ACTION_LOGOUT_TEXT = """🚪 **How to Logout**
 
 Just type `/logout` — the bot will remove your saved session right away. ✅"""
 
-ACTION_GETTHUMB_TEXT = """👁 **View Your Thumbnail**
+ACTION_GETTHUMB_TEXT = """👀 **View Your Thumbnail**
 
 Type `/getthumb` to see the thumbnail you have saved. 🖼"""
 
-ACTION_RMTHUMB_TEXT = """🗑 **Remove Your Thumbnail**
+ACTION_RMTHUMB_TEXT = """♻️ **Remove Your Thumbnail**
 
 Type `/rmthumb` to delete your saved thumbnail. ✅
 
 __After this, downloaded videos will have no custom thumbnail.__"""
 
-TRANSFER_TEXT = """🔄 **Transfer Premium**
+TRANSFER_TEXT = """💫 **Transfer Premium**
 
 Want to give your premium plan to a friend? 🎁
 
@@ -183,12 +168,7 @@ async def handle_callback_query(client: Client, callback_query: CallbackQuery):
     # ── HOME ──────────────────────────────────────
     if data in ("menu_home", "main_menu", "menu_back"):
         await _edit(client, chat_id, message_id, HOME_TEXT, get_start_inline())
-        return await callback_query.answer("🏠 Main menu")
-
-    # ── AUTO LINK GUIDE ───────────────────────────
-    if data in ("menu_autolink", "menu_dl"):
-        await _edit(client, chat_id, message_id, AUTOLINK_GUIDE_TEXT, back_to_home())
-        return await callback_query.answer("🔗 Single Link DL")
+        return await callback_query.answer("🏡 Home")
 
     # ── AUTO BATCH GUIDE ──────────────────────────
     if data in ("menu_autobatch", "menu_batch"):
@@ -204,15 +184,15 @@ async def handle_callback_query(client: Client, callback_query: CallbackQuery):
                 InlineKeyboardButton("🌟 Plan 2 — 500 ⭐", callback_data="plan_select_plan2"),
             ],
             [InlineKeyboardButton("💎 Plan 3 — 1000 ⭐", callback_data="plan_select_plan3")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")],
+            [InlineKeyboardButton("🏡 Home", callback_data="menu_home")],
         ])
         await _edit(client, chat_id, message_id, PLAN_OPTIONS_TEXT, plan_buttons)
-        return await callback_query.answer("⭐ Plans")
+        return await callback_query.answer("👑 Plans")
 
     # ── PROFILE ───────────────────────────────────
     if data == "menu_profile":
         await _edit(client, chat_id, message_id, PROFILE_TEXT, back_to_home())
-        return await callback_query.answer("👤 Profile")
+        return await callback_query.answer("🧾 Profile")
 
     # ── THUMBNAIL MENU ────────────────────────────
     if data == "menu_thumb":
@@ -221,24 +201,24 @@ async def handle_callback_query(client: Client, callback_query: CallbackQuery):
 
     if data == "guide_setthumb":
         await _edit(client, chat_id, message_id, GUIDE_SETTHUMB_TEXT, back_to_home())
-        return await callback_query.answer("📌 Set Thumbnail")
+        return await callback_query.answer("🖼 Set Thumbnail")
 
     if data == "action_getthumb":
         await _edit(client, chat_id, message_id, ACTION_GETTHUMB_TEXT, back_to_home())
-        return await callback_query.answer("👁 View Thumbnail")
+        return await callback_query.answer("👀 View Thumbnail")
 
     if data == "action_rmthumb":
         await _edit(client, chat_id, message_id, ACTION_RMTHUMB_TEXT, back_to_home())
-        return await callback_query.answer("🗑 Remove Thumbnail")
+        return await callback_query.answer("♻️ Remove Thumbnail")
 
     # ── LOGIN MENU ────────────────────────────────
     if data == "menu_login":
         await _edit(client, chat_id, message_id, LOGIN_MENU_TEXT, get_login_menu())
-        return await callback_query.answer("🔐 Login / Logout")
+        return await callback_query.answer("🔑 Login / Logout")
 
     if data == "action_login":
         await _edit(client, chat_id, message_id, ACTION_LOGIN_TEXT, back_to_home())
-        return await callback_query.answer("🔐 Login")
+        return await callback_query.answer("🔑 Login")
 
     if data == "action_logout":
         await _edit(client, chat_id, message_id, ACTION_LOGOUT_TEXT, back_to_home())
@@ -247,14 +227,14 @@ async def handle_callback_query(client: Client, callback_query: CallbackQuery):
     # ── TRANSFER ─────────────────────────────────
     if data == "menu_transfer":
         await _edit(client, chat_id, message_id, TRANSFER_TEXT, back_to_home())
-        return await callback_query.answer("🔄 Transfer Premium")
+        return await callback_query.answer("💫 Transfer Premium")
 
     # ── REFERRAL ─────────────────────────────────
     if data == "menu_referral":
         from plugins.referral import get_referral_text
         referral_text = await get_referral_text(client, user_id)
         await _edit(client, chat_id, message_id, referral_text, back_to_home())
-        return await callback_query.answer("🔗 Referral")
+        return await callback_query.answer("🎁 Referral")
 
     # ── SETTINGS ──────────────────────────────────
     if data == "menu_settings":
