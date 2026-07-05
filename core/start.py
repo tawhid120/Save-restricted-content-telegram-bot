@@ -59,18 +59,21 @@ def setup_start_handler(app: Client):
             except Exception as e:
                 LOGGER.error(f"Referral tracking error for {user.id}: {e}")
 
-        start_message = f"""⚡ **Hi {user_fullname}! Welcome to the Next-Gen Downloader!** 
+        start_message = f"""✨ **Welcome, {user_fullname}!** ✨
+⚡ **The Ultimate Restricted Content Downloader**
 
-🔥 **What's New (v2.0):**
-• **Instant Download:** Just send any link — public or private!
-• **Smart Batching:** Download multiple restricted files at once.
-• **Ultra Fast:** Upgraded servers for lightning-fast delivery.
-
-✨ *Free users get 1 download every 5 mins. Go Premium for zero cooldown & bulk batching!*
-
-👇 **Send any Telegram link below to start downloading right now!**
 ━━━━━━━━━━━━━━━━━━━━━━━━
-📢 **Stay Updated:** [Join Channel](https://t.me/juktijol)
+❏ **NEW UPDATE FEATURES:**
+✓ **Instant Bypass:** Send any link to download instantly.
+✓ **Batch Mode:** Save multiple restricted files at once.
+✓ **Private Source:** Access and download from private chats.
+
+❏ **BENEFITS:**
+✓ **Premium:** Remove 5-min cooldown & unlock bulk download!
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+👇 **Just paste your Telegram link below to start:**
+"""
 """
 
         await message.reply_text(
