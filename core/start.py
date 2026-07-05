@@ -59,25 +59,18 @@ def setup_start_handler(app: Client):
             except Exception as e:
                 LOGGER.error(f"Referral tracking error for {user.id}: {e}")
 
-        start_message = f"""Hey there, {user_fullname}! 👋 Welcome!
+        start_message = f"""⚡ **Hi {user_fullname}! Welcome to the Next-Gen Downloader!** 
 
-━━━━━━━━━━━━━━━━━━━━━━━
+🔥 **What's New (v2.0):**
+• **Instant Download:** Just send any link — public or private!
+• **Smart Batching:** Download multiple restricted files at once.
+• **Ultra Fast:** Upgraded servers for lightning-fast delivery.
 
-🤔 **What Does This Bot Do?**
-This bot allows you to bypass restrictions and easily download or forward content from public channels, private channels, and groups where saving or forwarding is disabled.
+✨ *Free users get 1 download every 5 mins. Go Premium for zero cooldown & bulk batching!*
 
-📖 **How It Works:**
-• **Auto Download:** Simply paste any Telegram link directly into the chat — no command needed!
-• **Auto Batch:** Paste a link and the bot will ask how many messages to download at once.
-• **Private Content:** Securely log in to download files from private channels you are already a member of. Files are sent directly to your Saved Messages.
-
-💎 **Free vs Premium:**
-Free users have a 5-minute cooldown between downloads. Premium users get instant, unlimited access and batch downloading!
-
-📌 **Just paste any Telegram link to get started!**
-
-━━━━━━━━━━━━━━━━━━━━━━━
-📢 Stay updated → [Join @juktijol](https://t.me/juktijol)
+👇 **Send any Telegram link below to start downloading right now!**
+━━━━━━━━━━━━━━━━━━━━━━━━
+📢 **Stay Updated:** [Join Channel](https://t.me/juktijol)
 """
 
         await message.reply_text(
