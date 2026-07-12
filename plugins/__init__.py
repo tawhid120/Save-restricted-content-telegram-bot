@@ -10,6 +10,7 @@ from .ytupload import setup_ytupload_handler
 from .refresh import setup_refresh_handler
 from .settings import setup_settings_handler
 from .autolink import setup_autolink_handler
+from .cleaner import setup_cleaner_handler
 from .referral import setup_referral_handler
   # ← bug fix: handle → handler
 
@@ -24,5 +25,6 @@ def setup_plugins_handlers(app):
     setup_refresh_handler(app)
     setup_settings_handler(app)
     setup_autolink_handler(app)   # group=1 — Telegram লিংক handle করে
+    setup_cleaner_handler(app)
     setup_referral_handler(app)
     
