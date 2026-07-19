@@ -1,6 +1,7 @@
 # 🐍 পাইথন শেখার নোট — একদম শুরু থেকে (বাংলায়)
 
-> **এই নোট কাদের জন্য?**                           > যারা আগে কখনো কোডিং বা পাইথন দেখেনি। একদম শূন্য থেকে শিখবে।
+> **এই নোট কাদের জন্য?**
+> যারা আগে কখনো কোডিং বা পাইথন দেখেনি। একদম শূন্য থেকে শিখবে।
 > এখানে ইংরেজি শব্দগুলোর বাংলা মানে + কী কাজ করে — সব একদম সহজ ভাষায় লেখা হয়েছে।
 > ছোট বাচ্চাও যাতে বুঝতে পারে, এমন ভাষায় লেখা হয়েছে।
 >
@@ -14,7 +15,8 @@
 - কম্পিউটার কী? প্রোগ্রাম কী?
 - পাইথন কী? কেন শিখবো?
 
-**অংশ ২ — পাইথনের মৌলিক শব্দ ও নিয়ম**              - `print` কী? (স্ক্রিনে লেখা দেখানো)
+**অংশ ২ — পাইথনের মৌলিক শব্দ ও নিয়ম**
+- `print` কী? (স্ক্রিনে লেখা দেখানো)
 - `import` কী? (অন্যের তৈরি সরঞ্জাম ব্যবহার)
 - ভেরিয়েবল (Variable) — নাম দিয়ে রাখা
 - `def` — নিজের তৈরি কাজ
@@ -24,17 +26,21 @@
 - `try` / `except` — ভুল হলে কী করবে
 - `async` / `await` — একসাথে অনেক কাজ
 - `f"..."` — লেখার ভিতরে সংখ্যা বসানো
-                                                  **অংশ ৩ — এই প্রজেক্টটা আসলে কী?**
+
+**অংশ ৩ — এই প্রজেক্টটা আসলে কী?**
 - Telegram Bot মানে কী?
 - বটটা কীভাবে কাজ করে (ছবি দিয়ে বোঝানো)
 
 **অংশ ৪ — ফোল্ডার ও ফাইলের ছবি (স্ট্রাকচার)**
-                                                  **অংশ ৫ — প্রতিটা ফাইল বিস্তারিত ব্যাখ্যা**
+
+**অংশ ৫ — প্রতিটা ফাইল বিস্তারিত ব্যাখ্যা**
 - `main.py` — বট চালু করার মূল দরজা
 - `app.py` — বটের "ফোন" (কানেকশন)
 - `bot.py` — ইউজার সেজে লগইন
-- `web.py` — বটকে ঘুম থেকে জাগ্রত রাখা              - `core/` — ডাটাবেস ও /start
-- `utils/` — সাহায্যকারী টুল                        - `plugins/` — সব ফিচার
+- `web.py` — বটকে ঘুম থেকে জাগ্রত রাখা
+- `core/` — ডাটাবেস ও /start
+- `utils/` — সাহায্যকারী টুল
+- `plugins/` — সব ফিচার
 - `auth/` — বড়দের (অ্যাডমিন) কমান্ড
 - `misc/` — বাটন ও কিবোর্ড
 - `db/` — ইউজার ডাটা সেভ
@@ -42,7 +48,7 @@
 
 **অংশ ৬ — অ্যাডভান্সড বিষয় (একটু বড়দের জন্য)**
 
-**অংশ ৭ — তোমার প্র্যাকটিস (নিজে চর্চা)**            
+**অংশ ৭ — তোমার প্র্যাকটিস (নিজে চর্চা)**
 ---
 
 # 🟢 অংশ ১ — কম্পিউটার ও প্রোগ্রামিং বোঝো
@@ -53,7 +59,8 @@
 ## প্রোগ্রাম কী?
 প্রোগ্রাম মানে **নির্দেশের একটা তালিকা**। ঠিক যেমন রান্নার রেসিপি:
 - চুলায় আঁচ দাও
-- প্যানে তেল দাও                                   - ডিম ভাজো
+- প্যানে তেল দাও
+- ডিম ভাজো
 
 কম্পিউটারকেও এমনি করে ধাপে ধাপে নির্দেশ দিতে হয়। সেই নির্দেশের ভাষাকে বলে **প্রোগ্রামিং ল্যাঙ্গুয়েজ** (Programming Language)। পাইথন এমনই একটা ভাষা।
 
@@ -62,7 +69,7 @@
 ```python
 print("হ্যালো দুনিয়া")
 ```
-এটি স্ক্রিনে লিখবে: **হ্যালো দুনিয়া**                 
+এটি স্ক্রিনে লিখবে: **হ্যালো দুনিয়া**
 পাইথন দিয়ে গেম, ওয়েবসাইট, বট, ডাটা এনালাইসিস — সব করা যায়।
 
 ---
@@ -70,10 +77,12 @@ print("হ্যালো দুনিয়া")
 # 🟢 অংশ ২ — পাইথনের মৌলিক শব্দ ও নিয়ম
 
 নিচে প্রতিটা শব্দের বাংলা মানে + উদাহরণ দেওয়া হলো।
-                                                  ## ১. `print` — স্ক্রিনে লেখা দেখানো
+
+## ১. `print` — স্ক্রিনে লেখা দেখানো
 - **মানে:** "ছাপাও" বা "দেখাও"।
 - **কাজ:** যা লেখা থাকবে, স্ক্রিনে দেখাবে।
-```python                                         print("আমি পাইথন শিখছি")
+```python
+print("আমি পাইথন শিখছি")
 ```
 → স্ক্রিনে লেখা আসবে: আমি পাইথন শিখছি
 
@@ -94,27 +103,39 @@ from time import sleep   # "time" থেকে শুধু "sleep" টুকু
 name = "সুমন"      # name নামে "সুমন" রাখলাম
 age = 20            # age নামে 20 রাখলাম
 print(name)         # → সুমন
-```                                               - `=` চিহ্নটা এখানে "সমান" না, এটা "বামে ডানের জিনিসটা রাখো" মানে।
+```
+- `=` চিহ্নটা এখানে "সমান" না, এটা "বামে ডানের জিনিসটা রাখো" মানে।
 
 ## ৪. `def` — নিজের তৈরি কাজ
 - **মানে:** "define" = সংজ্ঞা দাও / তৈরি করো।
 - **কাজ:** একটা কাজের নাম দিয়ে একটা গোছা কোড বানাই। পরে শুধু নাম ডাকলেই কাজটা হয়।
-```python                                         def greet():                    # greet নামে একটা কাজ বানালাম
+```python
+def greet():                    # greet নামে একটা কাজ বানালাম
     print("হ্যালো!")           # এর ভিতরে কী করবে
 
 greet()                        # এখন ডাকলাম → হ্যালো! ছাপাবে
-```                                               - `()` এই বন্ধনীর ভিতরে আমরা "ইনপুট" দেই (কাজটা যা দরকার)।                                            
-## ৫. `if` / `else` — শর্ত (যদি... তাহলে...)       - **মানে:** "যদি" / "নাহলে"।
+```
+- `()` এই বন্ধনীর ভিতরে আমরা "ইনপুট" দেই (কাজটা যা দরকার)।
+
+## ৫. `if` / `else` — শর্ত (যদি... তাহলে...)
+- **মানে:** "যদি" / "নাহলে"।
 - **কাজ:** কোনো শর্ত পূরণ হলে এক কাজ, না হলে অন্য কাজ।
-```python                                         age = 20
-if age >= 18:                                         print("তুমি বড়")        # যদি 18 বা বেশি হয়
+```python
+age = 20
+if age >= 18:
+    print("তুমি বড়")        # যদি 18 বা বেশি হয়
 else:
     print("তুমি ছোট")        # নাহলে
 ```
-                                                  ## ৬. `for` / `while` — বারবার কাজ
-- **মানে:** "জন্য" / "যতক্ষণ"।                      - **কাজ:** একই কাজ বারবার করা।
-```python                                         for i in range(3):     # i = 0, 1, 2 — তিনবার ঘুরবে
-    print("হ্যালো")      # ৩ বার হ্যালো ছাপাবে      ```                                               
+
+## ৬. `for` / `while` — বারবার কাজ
+- **মানে:** "জন্য" / "যতক্ষণ"।
+- **কাজ:** একই কাজ বারবার করা।
+```python
+for i in range(3):     # i = 0, 1, 2 — তিনবার ঘুরবে
+    print("হ্যালো")      # ৩ বার হ্যালো ছাপাবে
+```
+
 ## ৭. লিস্ট (List) ও ডিকশনারি (Dict)
 ### লিস্ট (List) — সাজানো তালিকা
 ```python
@@ -129,18 +150,24 @@ user = {"name": "সুমন", "age": 20}
 print(user["name"])    # → সুমন
 ```
 - `{ }` বন্ধনী দিয়ে লেখা হয়। `"name": "সুমন"` মানে নাম হচ্ছে সুমন।
-                                                  ## ৮. `try` / `except` — ভুল হলে কী করবে
+
+## ৮. `try` / `except` — ভুল হলে কী করবে
 - **মানে:** "চেষ্টা করো" / "ছাড়া নাও" (ভুল ধরো)।
 - **কাজ:** কোনো কাজে ভুল হলে প্রোগ্রাম বন্ধ না করে, ভুলটা ধরে অন্য কাজ করে।
 ```python
-try:                                                  print(ভাঙা_জিনিস)     # এটা ভুল, কারণ ভাঙা_জিনিস নাই
+try:
+    print(ভাঙা_জিনিস)     # এটা ভুল, কারণ ভাঙা_জিনিস নাই
 except:
-    print("ভুল হয়েছে!")    # ভুল ধরে এটা ছাপাবে, প্রোগ্রাম বন্ধ হবে না                                   ```
-                                                  ## ৯. `async` / `await` — একসাথে অনেক কাজ
+    print("ভুল হয়েছে!")    # ভুল ধরে এটা ছাপাবে, প্রোগ্রাম বন্ধ হবে না
+```
+
+## ৯. `async` / `await` — একসাথে অনেক কাজ
 - **মানে:** "async" = অ্যাসিঙ্ক্রোনাস = একসাথে / অপেক্ষা না করে। "await" = অপেক্ষা করো।
-- **কাজ:** সাধারণত কম্পিউটার একটা কাজ শেষ না করা পর্যন্ত পরের কাজ করে না। কিন্তু বটের অনেক ইউজার একসাথে আসে। তাই `async` দিয়ে একাধিক কাজ একসাথে চালায়।     ```python
+- **কাজ:** সাধারণত কম্পিউটার একটা কাজ শেষ না করা পর্যন্ত পরের কাজ করে না। কিন্তু বটের অনেক ইউজার একসাথে আসে। তাই `async` দিয়ে একাধিক কাজ একসাথে চালায়।
+```python
 async def download():        # async = এটা একসাথে চলতে পারে
-    await wait_for_file()    # await = এইটা শেষ না হওয়া পর্যন্ত এখানে দাঁড়াও                           ```
+    await wait_for_file()    # await = এইটা শেষ না হওয়া পর্যন্ত এখানে দাঁড়াও
+```
 - এটা একটু বড়দের বিষয়, মোটামুটি বুঝলেই হবে: **অনেকে একসাথে বট ব্যবহার করতে পারে** এজন্য এটা লাগে।
 
 ## ১০. `f"..."` — লেখার ভিতরে সংখ্যা বসানো
@@ -174,7 +201,8 @@ print(f"হ্যালো {name}!")    # → হ্যালো সুমন!
      │
      ▼
   বটের প্রোগ্রাম (main.py)
-     │                                                 ├──→ চেক করে: ইউজার চ্যানেলে জয়েন করেছে? (force_sub)
+     │
+     ├──→ চেক করে: ইউজার চ্যানেলে জয়েন করেছে? (force_sub)
      ├──→ ডাটাবেসে নাম সেভ করে (database)
      ├──→ লিংকটা বুঝে ফাইল ডাউনলোড করে (plugins)
      │
@@ -224,35 +252,67 @@ Save-restricted-content-telegram-bot/   ← মূল ফোল্ডার
 
 নিচে প্রতিটা ফাইল কীভাবে কাজ করে, লাইনে লাইনে বোঝানো হলো।
 
----                                                                                                 ## 📄 `main.py` — বট চালু করার মূল দরজা             
-এটি সবার আগে চলে। যেমন বাড়ির মূল দরজা দিয়ে ঢোকা।   
-```python                                         import sys
-import asyncio                                    ```
+---
+
+## 📄 `main.py` — বট চালু করার মূল দরজা
+
+এটি সবার আগে চলে। যেমন বাড়ির মূল দরজা দিয়ে ঢোকা।
+```python
+import sys
+import asyncio
+```
 - `import sys` → "sys" সরঞ্জাম আনো (সিস্টেম নিয়ে কাজ)।
 - `import asyncio` → "asyncio" সরঞ্জাম আনো (একসাথে অনেক কাজ করার যন্ত্র)।
-                                                  ```python                                         try:                                                  import uvloop                                     uvloop.install()                                  print("✅ uvloop installed — event loop boosted!")                                              except ImportError:                                   print("⚠️ uvloop not available, using default asyncio loop")                                     ```                                               - `try:` → চেষ্টা করো uvloop আনতে।                 - `uvloop` → asyncio-এর একটা দ্রুত সংস্করণ (গাড়ির টার্বোর মতো)।                                         - `uvloop.install()` → এটা চালু করো।               - `except ImportError:` → যদি uvloop না থাকে (যেমন Windows-এ), তাহলে ভুল দেখিয়ে সাধারণটা ব্যবহার করো।
-- মানে: **যদি দ্রুত ইঞ্জিন পাও তবে লাগাও, নাহলে সাধারণটা চলবে।**
-                                                  ```python
-from utils import LOGGER                          from utils.force_sub import setup_force_sub_handler                                                 from auth import setup_auth_handlers
-from plugins import setup_plugins_handlers        from core import setup_start_handler, init_db
-from misc import handle_callback_query            from misc.button_router import setup_button_router
-from app import app                               ```
-- এখানে অন্য ফোল্ডার থেকে বিভিন্ন "setup" ফাংশন আনা হয়েছে।
-- `setup_..._handler` মানে: "এই কাজটা যদি ঘটে, তবে এই ফাংশনটা চালাও" — এটাকে বলে **Handler** (হ্যান্ডলার = হাত দিয়ে ধরা/সামলানো)।                       
 ```python
-asyncio.get_event_loop().run_until_complete(init_db())                                              ```
+try:
+    import uvloop
+    uvloop.install()
+    print("✅ uvloop installed — event loop boosted!")
+except ImportError:
+    print("⚠️ uvloop not available, using default asyncio loop")
+```
+- `try:` → চেষ্টা করো uvloop আনতে।
+- `uvloop` → asyncio-এর একটা দ্রুত সংস্করণ (গাড়ির টার্বোর মতো)।
+- `uvloop.install()` → এটা চালু করো।
+- `except ImportError:` → যদি uvloop না থাকে (যেমন Windows-এ), তাহলে ভুল দেখিয়ে সাধারণটা ব্যবহার করো।
+- মানে: **যদি দ্রুত ইঞ্জিন পাও তবে লাগাও, নাহলে সাধারণটা চলবে।**
+
+```python
+from utils import LOGGER
+from utils.force_sub import setup_force_sub_handler
+from auth import setup_auth_handlers
+from plugins import setup_plugins_handlers
+from core import setup_start_handler, init_db
+from misc import handle_callback_query
+from misc.button_router import setup_button_router
+from app import app
+```
+- এখানে অন্য ফোল্ডার থেকে বিভিন্ন "setup" ফাংশন আনা হয়েছে।
+- `setup_..._handler` মানে: "এই কাজটা যদি ঘটে, তবে এই ফাংশনটা চালাও" — এটাকে বলে **Handler** (হ্যান্ডলার = হাত দিয়ে ধরা/সামলানো)।
+
+```python
+asyncio.get_event_loop().run_until_complete(init_db())
+```
 - `asyncio.get_event_loop()` → কাজ চালানোর চাকা (ইভেন্ট লুপ) নাও।
 - `run_until_complete(init_db())` → ডাটাবেস রেডি না হওয়া পর্যন্ত অপেক্ষা করো।
-- মানে: বট চালুর আগে ডাটাবেস ঠিক করো।              
-```python                                         setup_force_sub_handler(app)     # ১. আগে চেক: ইউজার চ্যানেলে আছে?
-setup_plugins_handlers(app)      # ২. সব ফিচার (যুটিউব, লিংক ডাউনলোড)
-setup_auth_handlers(app)         # ৩. অ্যাডমিন কমান্ড                                                 setup_start_handler(app)         # ৪. /start কমান্ড
-setup_button_router(app)         # ৫. নিচের বাটনগুলো (সবশেষে)
-```                                               - **অর্ডার গুরুত্বপূর্ণ:** আগে চেক করতে হবে ইউজার চ্যানেলে জয়েন করেছে কি না। না করলে বাকি কাজ হবে না।
-                                                  ```python                                         @app.on_callback_query()
-async def handle_callback(client, callback_query):    await handle_callback_query(client, callback_query)
+- মানে: বট চালুর আগে ডাটাবেস ঠিক করো।
 
-LOGGER.info("Bot Successfully Started! 💥")       app.run()
+```python
+setup_force_sub_handler(app)     # ১. আগে চেক: ইউজার চ্যানেলে আছে?
+setup_plugins_handlers(app)      # ২. সব ফিচার (যুটিউব, লিংক ডাউনলোড)
+setup_auth_handlers(app)         # ৩. অ্যাডমিন কমান্ড
+setup_start_handler(app)         # ৪. /start কমান্ড
+setup_button_router(app)         # ৫. নিচের বাটনগুলো (সবশেষে)
+```
+- **অর্ডার গুরুত্বপূর্ণ:** আগে চেক করতে হবে ইউজার চ্যানেলে জয়েন করেছে কি না। না করলে বাকি কাজ হবে না।
+
+```python
+@app.on_callback_query()
+async def handle_callback(client, callback_query):
+    await handle_callback_query(client, callback_query)
+
+LOGGER.info("Bot Successfully Started! 💥")
+app.run()
 ```
 - `@app.on_callback_query()` → যদি ইউজার ইনলাইন বাটনে চাপ দেয়, তবে এই ফাংশন চলবে।
 - `LOGGER.info(...)` → লগ ফাইলে লেখো "বট চালু হয়েছে"।
@@ -267,7 +327,8 @@ from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN
 ```
 - `pyrogram` → টেলিগ্রামের সাথে কথা বলার একটা সরঞ্জাম (লাইব্রেরি)।
-- `Client` → "ক্লায়েন্ট" = ক্লায়েন্ট = যে ফোন দিয়ে টেলিগ্রামে ঢোকে।                                      - `config` → আমাদের সিক্রেট তথ্যের ফাইল (API_ID, ইত্যাদি)।
+- `Client` → "ক্লায়েন্ট" = ক্লায়েন্ট = যে ফোন দিয়ে টেলিগ্রামে ঢোকে।
+- `config` → আমাদের সিক্রেট তথ্যের ফাইল (API_ID, ইত্যাদি)।
 
 ```python
 app = Client(
@@ -420,7 +481,8 @@ if __name__ == "__main__":
 - `threading.Thread(...)` → আলাদা "কর্মী" তৈরি (একজন ওয়েব সার্ভার চালাবে, আরেকজন জাগিয়ে রাখবে)।
 - `daemon=True` → মূল প্রোগ্রাম বন্ধ হলে এরাও বন্ধ হবে।
 - `os.system("bash start.sh")` → বট চালু করার স্ক্রিপ্ট রান করো।
-                                                  ---
+
+---
 
 ## 📂 `core/` — ডাটাবেস ও /start কমান্ড
 
@@ -444,7 +506,8 @@ from config import MONGO_URL
 _main_client = AsyncIOMotorClient(
     MONGO_URL,
     connectTimeoutMS=10000,
-    socketTimeoutMS=10000,                        )
+    socketTimeoutMS=10000,
+)
 _main_db = _main_client["ItsSmartTool"]
 ```
 - `AsyncIOMotorClient(...)` → ডাটাবেসের সাথে কানেক্ট করার "ফোন"।
@@ -598,7 +661,7 @@ def get_readable_file_size(size_in_bytes):
 - `size_in_bytes /= 1024` → ১০২৪ দিয়ে ভাগ দাও (কিলোবাইটে রূপান্তর)।
 - `f"{size_in_bytes:.2f} {unit}"` → দশমিক ২ ঘরসহ সংখ্যা + ইউনিট লেখো (যেমন "২.৫০ MB")।
 
-মানে: **বাইট সংখ্যাকে " MB" বা " GB" এ বদলে দেয় যাতে মানুষ বুঝতে পারে।**
+মানে: **বাইট সংখ্যাকে "MB" বা "GB" এ বদলে দেয় যাতে মানুষ বুঝতে পারে।**
 
 ### `utils/force_sub.py` — ফোর্স সাবস্ক্রাইব (চ্যানেলে জয়েন বাধ্যতামূলক)
 
@@ -657,7 +720,8 @@ async def check_force_sub(client, user_id, refresh=False):
         return is_sub
 ```
 - `check_force_sub(...)` → চেক করো ইউজার চ্যানেলে আছে কি না।
-- `if not API_CHANNEL: return True` → ফোর্স-সাব বন্ধ থাকলে সবাইকে allow।                              - `if user_id == DEVELOPER_USER_ID: return True` → বটের মালিক সবসময় allow।
+- `if not API_CHANNEL: return True` → ফোর্স-সাব বন্ধ থাকলে সবাইকে allow।
+- `if user_id == DEVELOPER_USER_ID: return True` → বটের মালিক সবসময় allow।
 - `asyncio.wait_for(..., timeout=5.0)` → ৫ সেকেন্ডের বেশি লাগলে টাইমআউট।
 - `member.status not in (...)` → স্ট্যাটাস যদি "ব্যানড" বা "লেফট" না হয়, তবে সাবস্ক্রাইব করা।
 
@@ -701,12 +765,88 @@ def setup_force_sub_handler(app):
 
 ## 📂 `plugins/` — সব ফিচার (যুটিউব, লিংক ডাউনলোড)
 
-এখানে অনেক ফাইল: `yt.py` (যুটিউব), `autolink.py` (টেলিগ্রাম লিংক), `settings.py` (সেটিংস), `plan.py` (প্রিমিয়াম), ইত্যাদি।                                
+এখানে অনেক ফাইল: `yt.py` (যুটিউব), `autolink.py` (টেলিগ্রাম লিংক), `settings.py` (সেটিংস), `plan.py` (প্রিমিয়াম), ইত্যাদি।
+
 ### `plugins/__init__.py` — সব ফিচার রেজিস্টার করা
 
 ```python
-from .plan import setup_plan_handler              from .info import setup_info_handler              from .thumb import setup_thumb_handler            from .login import setup_login_handler            ...                                               def setup_plugins_handlers(app):                      setup_plan_handler(app)                           setup_info_handler(app)                           setup_thumb_handler(app)                          ...                                           ```                                               - `from .plan import setup_plan_handler` → এই ফোল্ডারের `plan.py` থেকে ফাংশন আনো।                    - `setup_plugins_handlers(app)` → সব ফিচার বটে যোগ করো।                                                                                               ### `plugins/yt.py` — যুটিউব ডাউনলোডার (উদাহরণ)                                                      ```python                                         pending_downloads: dict = {}                      SPLIT_PROMPT_TEXT = (                                 "**Bro File Size Exceeds 2 GB Limit❌**\n"        "Do You Want Spilted Downloader⬇️?"            )                                                 ```                                               - `pending_downloads: dict = {}` → চলমান ডাউনলোডগুলো মনে রাখার ডিকশনারি।                             - `SPLIT_PROMPT_TEXT` → ফাইল ২ GB-এর বেশি হলে ভাগ করার (split) প্রশ্ন।                                                                                  ```python                                         @Client.on_message(filters.command(["yt", "video", "mp4", "dl"], prefixes=["/", "!", "."]))         async def yt_video_command(client, message):          query = message.text.split(None, 1)[1].strip() if len(...) > 1 else ""                          ```                                               - `@Client.on_message(...)` → ডেকোরেটর = উপরে লেখা নিয়ম। যদি `yt`/`video`/`mp4`/`dl` কমান্ড আসে, তবে এই ফাংশন চলবে।                                    - `prefixes=["/", "!", "."]` → কমান্ড আগে `/`, `!`, বা `.` যেকোনোটা থাকতে পারে।                      - `message.text.split(None, 1)` → মেসেজকে স্পেস দিয়ে ২ ভাগ করো (কমান্ড + সার্চ কোয়েরি)।                - `[1]` → দ্বিতীয় অংশটা নাও (সার্চ কোয়েরি)।         - `.strip()` → আগে-পিছে ফাঁকা জায়গা কেটে দাও।                                                        ```python                                         async def handle_yt_command(client, message, query):                                                    status = await message.reply_text("🔍 Searching YouTube...")                                        video_url = youtube_parser(query)                 if not video_url:                                     video_url = await search_youtube_url(query)                                                 ```                                               - `await message.reply_text(...)` → "খুঁজছি..." রিপ্লাই দাও (এবং ওই মেসেজটা `status` এ রাখো)।          - `youtube_parser(query)` → কোয়েরি থেকে যুটিউব লিংক বের করো।                                         - `if not video_url:` → লিংক না পেলে, সার্চ করো।                                                     ```python                                             token = generate_token(message.from_user.id)      pending_downloads[token] = {                          "url": video_url,                                 "user_id": message.from_user.id,                  "chat_id": chat_id,                               "msg_id": status.id,                          }                                             ```                                               - `generate_token(...)` → ইউনিক (অনন্য) আইডি বানাও।- `pending_downloads[token] = {...}` → এই ডাউনলোডের তথ্য টোকেন দিয়ে মনে রাখো।                                                                          ```python                                         @Client.on_callback_query(filters.regex(r"^YV\|"))async def yt_video_cb(client, callback_query):        raw = callback_query.data                         parts = raw.split("|")                            token = parts[1]                                  quality_key = parts[2]                        ```                                               - `@Client.on_callback_query(...)` → যদি ইউজার ইনলাইন বাটনে চাপ দেয়।                                - `filters.regex(r"^YV\|")` → ডাটা "YV|" দিয়ে শুরু হলে মিলবে।                                         - `callback_query.data` → বাটনে লেখা ডাটা (যেমন "YV|abc123|720p")।                                  - `raw.split("|")` → পাইপ দিয়ে ভাঙো → `["YV", "abc123", "720p"]`।
-                                                  ```python                                             asyncio.create_task(do_video_download(client, token, quality_key))                              ```                                               - `asyncio.create_task(...)` → ব্যাকগ্রাউন্ডে (পেছনে) ডাউনলোড শুরু করো, অপেক্ষা না করে।
+from .plan import setup_plan_handler
+from .info import setup_info_handler
+from .thumb import setup_thumb_handler
+from .login import setup_login_handler
+...
+def setup_plugins_handlers(app):
+    setup_plan_handler(app)
+    setup_info_handler(app)
+    setup_thumb_handler(app)
+    ...
+```
+- `from .plan import setup_plan_handler` → এই ফোল্ডারের `plan.py` থেকে ফাংশন আনো।
+- `setup_plugins_handlers(app)` → সব ফিচার বটে যোগ করো।
+
+### `plugins/yt.py` — যুটিউব ডাউনলোডার (উদাহরণ)
+
+```python
+pending_downloads: dict = {}
+SPLIT_PROMPT_TEXT = (
+    "**Bro File Size Exceeds 2 GB Limit❌**\n"
+    "Do You Want Spilted Downloader⬇️?"
+)
+```
+- `pending_downloads: dict = {}` → চলমান ডাউনলোডগুলো মনে রাখার ডিকশনারি।
+- `SPLIT_PROMPT_TEXT` → ফাইল ২ GB-এর বেশি হলে ভাগ করার (split) প্রশ্ন।
+
+```python
+@Client.on_message(filters.command(["yt", "video", "mp4", "dl"], prefixes=["/", "!", "."]))
+async def yt_video_command(client, message):
+    query = message.text.split(None, 1)[1].strip() if len(...) > 1 else ""
+```
+- `@Client.on_message(...)` → ডেকোরেটর = উপরে লেখা নিয়ম। যদি `yt`/`video`/`mp4`/`dl` কমান্ড আসে, তবে এই ফাংশন চলবে।
+- `prefixes=["/", "!", "."]` → কমান্ড আগে `/`, `!`, বা `.` যেকোনোটা থাকতে পারে।
+- `message.text.split(None, 1)` → মেসেজকে স্পেস দিয়ে ২ ভাগ করো (কমান্ড + সার্চ কোয়েরি)।
+- `[1]` → দ্বিতীয় অংশটা নাও (সার্চ কোয়েরি)।
+- `.strip()` → আগে-পিছে ফাঁকা জায়গা কেটে দাও।
+
+```python
+async def handle_yt_command(client, message, query):
+    status = await message.reply_text("🔍 Searching YouTube...")
+    video_url = youtube_parser(query)
+    if not video_url:
+        video_url = await search_youtube_url(query)
+```
+- `await message.reply_text(...)` → "খুঁজছি..." রিপ্লাই দাও (এবং ওই মেসেজটা `status` এ রাখো)।
+- `youtube_parser(query)` → কোয়েরি থেকে যুটিউব লিংক বের করো।
+- `if not video_url:` → লিংক না পেলে, সার্চ করো।
+
+```python
+token = generate_token(message.from_user.id)
+pending_downloads[token] = {
+    "url": video_url,
+    "user_id": message.from_user.id,
+    "chat_id": chat_id,
+    "msg_id": status.id,
+}
+```
+- `generate_token(...)` → ইউনিক (অনন্য) আইডি বানাও।
+- `pending_downloads[token] = {...}` → এই ডাউনলোডের তথ্য টোকেন দিয়ে মনে রাখো।
+
+```python
+@Client.on_callback_query(filters.regex(r"^YV\|"))
+async def yt_video_cb(client, callback_query):
+    raw = callback_query.data
+    parts = raw.split("|")
+    token = parts[1]
+    quality_key = parts[2]
+```
+- `@Client.on_callback_query(...)` → যদি ইউজার ইনলাইন বাটনে চাপ দেয়।
+- `filters.regex(r"^YV\|")` → ডাটা "YV|" দিয়ে শুরু হলে মিলবে।
+- `callback_query.data` → বাটনে লেখা ডাটা (যেমন "YV|abc123|720p")।
+- `raw.split("|")` → পাইপ দিয়ে ভাঙো → `["YV", "abc123", "720p"]`।
+
+```python
+asyncio.create_task(do_video_download(client, token, quality_key))
+```
+- `asyncio.create_task(...)` → ব্যাকগ্রাউন্ডে (পেছনে) ডাউনলোড শুরু করো, অপেক্ষা না করে।
 
 ```python
 async def do_video_download(client, token, quality_key):
@@ -730,15 +870,19 @@ async def do_video_download(client, token, quality_key):
 
 ```python
 TELEGRAM_LINK_PATTERN = re.compile(
-    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?([a-zA-Z0-9_]+|\d+)/(\d+)(?:/\d+)?"               )
-```                                               - `re.compile(...)` → রেজেক্স (regex) = প্যাটার্ন ম্যাচ করার নিয়ম।
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?([a-zA-Z0-9_]+|\d+)/(\d+)(?:/\d+)?"
+)
+```
+- `re.compile(...)` → রেজেক্স (regex) = প্যাটার্ন ম্যাচ করার নিয়ম।
 - এটি টেলিগ্রাম লিংকের আকৃতি চিনে (যেমন `t.me/channel/123`)।
 - `re` → রেগুলার এক্সপ্রেশন মডিউল।
 
 ```python
 COOLDOWN_SECONDS = 300
 async def check_and_set_cooldown(user_id):
-    record = await daily_limit.find_one({"user_id": user_id})                                           if record:                                            last_dl = record.get("last_download")
+    record = await daily_limit.find_one({"user_id": user_id})
+    if record:
+        last_dl = record.get("last_download")
         elapsed = (now - last_dl).total_seconds()
         if elapsed < COOLDOWN_SECONDS:
             return int(COOLDOWN_SECONDS - elapsed)
@@ -747,10 +891,15 @@ async def check_and_set_cooldown(user_id):
 - `daily_limit.find_one(...)` → ডাটাবেস থেকে ইউজারের রেকর্ড খোঁজো।
 - `elapsed` → কত সেকেন্ড আগে ডাউনলোড করেছে হিসাব।
 - `if elapsed < COOLDOWN_SECONDS:` → যদি ৫ মিনিট না পার হয়ে থাকে, তবে অপেক্ষা করতে বলো।
-                                                  ---
-                                                  ## 📂 `auth/` — বড়দের (অ্যাডমিন) কমান্ড
-                                                  ```python
-from .logs.logs import setup_logs_handler         from .restart.restart import setup_restart_handlerfrom .speedtest.speedtest import setup_speed_handler                                                ...
+
+---
+
+## 📂 `auth/` — বড়দের (অ্যাডমিন) কমান্ড
+```python
+from .logs.logs import setup_logs_handler
+from .restart.restart import setup_restart_handler
+from .speedtest.speedtest import setup_speed_handler
+...
 def setup_auth_handlers(app):
     setup_sudo_handler(app)
     setup_restart_handler(app)
@@ -784,7 +933,8 @@ def get_main_reply_keyboard():
             ...
         ],
         resize_keyboard=True,
-    )                                             ```
+    )
+```
 - `InlineKeyboardMarkup` → মেসেজের সাথে থাকা বাটন (ক্লিক করলে ডাটা পাঠায়)।
 - `ReplyKeyboardMarkup` → চ্যাটের নিচে সবসময় থাকা বাটন।
 - `KeyboardButton("📦 Batch Download")` → "Batch Download" লেখা বাটন।
@@ -839,65 +989,96 @@ def setup_button_router(app):
 from datetime import datetime, timezone
 from utils import LOGGER
 from core.database import total_users
-                                                  async def upsert_user(user) -> dict:
-    now = datetime.now(timezone.utc)                  full_name = " ".join(
+
+async def upsert_user(user) -> dict:
+    now = datetime.now(timezone.utc)
+    full_name = " ".join(
         part for part in (user.first_name or "", user.last_name or "") if part
     ).strip() or "Unknown"
-                                                      doc = {                                               "user_id": user.id,                               "username": user.username or None,                "first_name": user.first_name or "",
-        "is_premium": bool(getattr(user, "is_premium", False)),                                             "last_active": now,
+
+    doc = {
+        "user_id": user.id,
+        "username": user.username or None,
+        "first_name": user.first_name or "",
+        "is_premium": bool(getattr(user, "is_premium", False)),
+        "last_active": now,
     }
 
     await total_users.update_one(
         {"user_id": user.id},
         {"$set": doc},
-        upsert=True,                                  )
-    return doc                                    ```
+        upsert=True,
+    )
+    return doc
+```
 - `upsert_user(user)` → ইউজারের তথ্য ডাটাবেসে সেভ/আপডেট করো।
-- `datetime.now(timezone.utc)` → বর্তমান UTC সময়।  - `" ".join(...)` → নামের অংশগুলো জোড়া দাও।
+- `datetime.now(timezone.utc)` → বর্তমান UTC সময়।
+- `" ".join(...)` → নামের অংশগুলো জোড়া দাও।
 - `bool(getattr(user, "is_premium", False))` → ইউজার প্রিমিয়াম কি না চেক করো (না থাকলে False)।
-- `doc = {...}` → ডাটাবেসে রাখার তথ্যের ডিকশনারি।  - `return doc` → যা লেখা হয়েছে তা ফেরত দাও।
-                                                  ---
-                                                  ## 📂 `cookies/` — যুটিউব কুকিজ
-                                                  ```
+- `doc = {...}` → ডাটাবেসে রাখার তথ্যের ডিকশনারি।
+- `return doc` → যা লেখা হয়েছে তা ফেরত দাও।
+
+---
+
+## 📂 `cookies/` — যুটিউব কুকিজ
+
+```
 cookies/ytcookies.txt
-```                                               - কুকিজ (cookies) = ওয়েবসাইটে লগইন তথ্য মনে রাখার ফাইল। যুটিউব ডাউনলোড করতে কখনো লাগে।                 
----                                               
-# 🟡 অংশ ৬ — অ্যাডভান্সড বিষয় (একটু বড়দের জন্য)       
-এগুলো একটু কঠিন, ধীরে ধীরে বুঝবে।                    
-## ১. Decorator (`@app.on_message`)               ফাংশনের উপরে লেখা `@...` কে বলে ডেকোরেটর। এটা ফাংশনের আচরণ বদলে দেয়। এখানে এটা বলে: "এই কমান্ড এলে এই ফাংশন চালাও"।
+```
+- কুকিজ (cookies) = ওয়েবসাইটে লগইন তথ্য মনে রাখার ফাইল। যুটিউব ডাউনলোড করতে কখনো লাগে।
+
+---
+
+# 🟡 অংশ ৬ — অ্যাডভান্সড বিষয় (একটু বড়দের জন্য)
+
+এগুলো একটু কঠিন, ধীরে ধীরে বুঝবে।
+
+## ১. Decorator (`@app.on_message`)
+ফাংশনের উপরে লেখা `@...` কে বলে ডেকোরেটর। এটা ফাংশনের আচরণ বদলে দেয়। এখানে এটা বলে: "এই কমান্ড এলে এই ফাংশন চালাও"।
 
 ## ২. Async/Await + Event Loop
 `asyncio` = ইভেন্ট লুপ (চাকা)। `async def` ফাংশনগুলো একসাথে চলতে পারে, তাই হাজার হাজার ইউজার হ্যান্ডেল করা যায়।
-                                                  ## ৩. uvloop                                      আমাদের asyncio-এর দ্রুত সংস্করণ (C দিয়ে বানানো)। গাড়ির টার্বোর মতো।
+
+## ৩. uvloop
+আমাদের asyncio-এর দ্রুত সংস্করণ (C দিয়ে বানানো)। গাড়ির টার্বোর মতো।
 
 ## ৪. Motor (Async MongoDB)
-ডাটাবেসে `await` দিয়ে কথা বলে। সিনক্রোনাস না, অ্যাসিঙ্ক্রোনাস।                                          
+ডাটাবেসে `await` দিয়ে কথা বলে। সিনক্রোনাস না, অ্যাসিঙ্ক্রোনাস।
+
 ## ৫. Threading
 `web.py`-এ একাধিক কাজ একসাথে (ওয়েব সার্ভার + কিপ-অ্যালাইভ + বট)।
 
-## ৬. Executor (`run_in_executor`)                ভারী কাজ (যেমন ffmpeg ভিডিও কাটা) মেইন লুপ ব্লক না করে আলাদা থ্রেডে চালায়।
+## ৬. Executor (`run_in_executor`)
+ভারী কাজ (যেমন ffmpeg ভিডিও কাটা) মেইন লুপ ব্লক না করে আলাদা থ্রেডে চালায়।
 
 ## ৭. Cache (TTL)
 বারবার API কল এড়াতে মেমোরিতে ডাটা মনে রাখে (force_sub.py)।
-                                                  ## ৮. Regex (`filters.regex`)
-প্যাটার্ন ম্যাচিং — কলব্যাক ডাটা পার্স করতে।           
+
+## ৮. Regex (`filters.regex`)
+প্যাটার্ন ম্যাচিং — কলব্যাক ডাটা পার্স করতে।
+
 ## ৯. Package Structure (`__init__.py`)
 কোডকে ছোট ছোট প্যাকেজে ভাগ করে রি-ইউজ করা।
 
 ## ১০. Environment Variables
-পাসওয়ার্ড/টোকেন কোডের ভিতরে না লিখে এনভায়রনমেন্ট ভেরিয়েবলে রাখা সিকিউর পদ্ধতি।                         
+পাসওয়ার্ড/টোকেন কোডের ভিতরে না লিখে এনভায়রনমেন্ট ভেরিয়েবলে রাখা সিকিউর পদ্ধতি।
+
 ## ১১. Dict-based State
 `pending_downloads[token]` → ইউজারের চলমান ডাউনলোড ট্র্যাক করতে।
-                                                  ## ১২. Circular Import এড়ানো
-```python                                         # ফাংশনের ভিতরে import করলে circular import এড়ানো যায়
+
+## ১২. Circular Import এড়ানো
+```python
+# ফাংশনের ভিতরে import করলে circular import এড়ানো যায়
 from plugins.referral import process_referral
 ```
 সাধারণত ফাইলের ওপরে import করি, কিন্তু কখনো কখনো ফাংশনের ভিতরে import করতে হয় যাতে দুই ফাইল একে অপরকে ঘুরে ঘুরে না ডাকে।
 
 ---
-                                                  # 🟡 অংশ ৭ — তোমার প্র্যাকটিস (নিজে চর্চা)
 
-নিচের গুলো নিজে করে দেখো:                          
+# 🟡 অংশ ৭ — তোমার প্র্যাকটিস (নিজে চর্চা)
+
+নিচের গুলো নিজে করে দেখো:
+
 **ধাপ ১:** পাইথন ইনস্টল করো (python.org থেকে)।
 ```bash
 python3 --version   # চেক করো পাইথন আছে কি
@@ -917,7 +1098,8 @@ print(f"আমার নাম {name}, বয়স {age}")
 
 **ধাপ ৪:** `if` চর্চা:
 ```python
-if age >= 18:                                         print("বড়")
+if age >= 18:
+    print("বড়")
 else:
     print("ছোট")
 ```
@@ -927,19 +1109,27 @@ else:
 for i in range(3):
     print("হ্যালো", i)
 ```
-                                                  **ধাপ ৬:** ডিকশনারি চর্চা:
-```python                                         user = {"name": "সুমন", "age": 20}
-print(user["name"])                               ```
+
+**ধাপ ৬:** ডিকশনারি চর্চা:
+```python
+user = {"name": "সুমন", "age": 20}
+print(user["name"])
+```
 
 **ধাপ ৭:** এই প্রজেক্টটা গভীরভাবে পড়ো — `main.py` দিয়ে শুরু করো, ধীরে ধীরে বাকি ফাইল।
 
 ---
 
 ## 📝 শেষ কথা
-                                                  এই প্রজেক্টটা বড় মনে হতে পারে, কিন্তু এর মূল লজিক খুব সিম্পল:
+
+এই প্রজেক্টটা বড় মনে হতে পারে, কিন্তু এর মূল লজিক খুব সিম্পল:
 
 > **মেসেজ আসে → হ্যান্ডলার চেক করে → কাজ করে → রিপ্লাই দেয়।**
-                                                  একটা একটা ফাইল পড়তে থাকো। বুঝতে না পারলে ওই ফাইলটা আবার পড়ো। ধীরে ধীরে সব বুঝে যাবে। 🚀               
+
+একটা একটা ফাইল পড়তে থাকো। বুঝতে না পারলে ওই ফাইলটা আবার পড়ো। ধীরে ধীরে সব বুঝে যাবে। 🚀
+
 **মনে রাখো:** প্রোগ্রামিং শেখা = সাঁতার শেখার মতো। জলে নামলে না, ততক্ষণ না শেখা যায়। তুমি এখন জলে নেমে গেছো! 💪
-                                                  ---
-                                                  *এই নোটটি তৈরি করেছে: তোমার পাইথন শেখার সাথী* 🙏
+
+---
+
+*এই নোটটি তৈরি করেছে: তোমার পাইথন শেখার সাথী* 🙏
