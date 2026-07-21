@@ -12,7 +12,7 @@ import asyncio
 from time import time
 from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatPreview
 from pyrogram.enums import ParseMode, ChatType
 from pyrogram.errors import (
     ChannelInvalid,
@@ -49,7 +49,7 @@ from config import DEVELOPER_USER_ID, LOG_GROUP_ID
 from utils.force_sub import check_force_sub
 
 TELEGRAM_LINK_PATTERN = re.compile(
-    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?([a-zA-Z0-9_]+|\d+)/(\d+)(?:/\d+)?"
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?([a-zA-Z0-9_]+|\d+)/(?:\d+/)?(\d+)"
 )
 
 COOLDOWN_SECONDS = 300  # 5 minutes
@@ -93,6 +93,82 @@ async def check_and_set_cooldown(user_id: int) -> int:
 
 def is_private_link(url: str) -> bool:
     return bool(re.search(r"(?:t\.me|telegram\.me)/c/", url))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ✅ NEW: DOWNLOAD-এর আগেই 2GB সাইজ চেক (স্ব-নির্ভর, বাইরের fileSizeLimit-এর উপর নির্ভর নয়)
+# পুরনো লজিক: download + upload করার পর fail করলে বলতো — সমস্যা।
+# নতুন লজিক: download শুরু করার আগেই chat_message থেকে file_size পড়ে ফেলা হয়
+# এবং 2GB-এর বেশি হলে download-ই শুরু করা হয় না।
+# ══════════════════════════════════════════════════════════════════════════════
+
+MAX_DOWNLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB (non-premium user client limit)
+
+
+def get_media_file_size(chat_message) -> int:
+    """
+    একটি Message অবজেক্ট থেকে media-র file_size বের করে।
+    কোনো media না থাকলে অথবা size জানা না গেলে 0 রিটার্ন করে।
+    """
+    for attr in ("document", "video", "audio", "photo", "animation", "voice", "video_note"):
+        media = getattr(chat_message, attr, None)
+        if media is not None:
+            return getattr(media, "file_size", 0) or 0
+    return 0
+
+
+def is_file_too_large(chat_message) -> bool:
+    """
+    ডাউনলোড শুরু করার আগেই চেক করে ফাইলটি 2GB-এর বেশি কিনা।
+    True মানে ফাইলটি স্কিপ করতে হবে (download/upload করা সম্ভব না)।
+    """
+    file_size = get_media_file_size(chat_message)
+    return file_size > MAX_DOWNLOAD_SIZE_BYTES
+
+
+def format_size(num_bytes: int) -> str:
+    """Human-readable ফাইল সাইজ (MB/GB) দেখানোর জন্য।"""
+    if not num_bytes:
+        return "unknown size"
+    gb = num_bytes / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.2f} GB"
+    mb = num_bytes / (1024 ** 2)
+    return f"{mb:.2f} MB"
+
+
+async def check_media_group_sizes(client_for_group, chat_message) -> tuple:
+    """
+    ✅ NEW: মিডিয়া গ্রুপ ডাউনলোড করার আগেই প্রতিটি আইটেমের সাইজ চেক করে।
+    ২ জিবির বেশি সাইজের আইটেমগুলো আলাদা করে রিপোর্ট করে, যাতে
+    processMediaGroup-কে কল করার আগেই ইউজারকে জানানো যায় কোনগুলো স্কিপ হচ্ছে।
+
+    Returns:
+        (oversized_count, oversized_names, total_count)
+        - oversized_count: কতগুলো আইটেম 2GB-এর বেশি
+        - oversized_names: স্কিপ হওয়া আইটেমগুলোর সংক্ষিপ্ত বিবরণ (তালিকা)
+        - total_count: গ্রুপে মোট আইটেম সংখ্যা
+    """
+    try:
+        group_messages = await client_for_group.get_media_group(
+            chat_id=chat_message.chat.id, message_id=chat_message.id
+        )
+    except Exception as e:
+        LOGGER.warning(f"[MediaGroup] get_media_group failed: {e}")
+        # get_media_group ব্যর্থ হলে শুধু বর্তমান মেসেজটাই চেক করো
+        group_messages = [chat_message]
+
+    oversized_count = 0
+    oversized_names = []
+    total_count = len(group_messages)
+
+    for gm in group_messages:
+        if is_file_too_large(gm):
+            oversized_count += 1
+            size_str = format_size(get_media_file_size(gm))
+            oversized_names.append(f"msg {gm.id} ({size_str})")
+
+    return oversized_count, oversized_names, total_count
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -383,19 +459,19 @@ def setup_autolink_handler(app: Client):
                     pass
                 return
 
-            if chat_message.document or chat_message.video or chat_message.audio:
-                file_size = (
-                    chat_message.document.file_size if chat_message.document else
-                    chat_message.video.file_size    if chat_message.video    else
-                    chat_message.audio.file_size
-                )
-                is_premium = await is_premium_user(user_id)
-                if not await fileSizeLimit(file_size, message, "download", is_premium):
-                    try:
-                        await processing_msg.delete()
-                    except Exception:
-                        pass
-                    return
+            # ✅ FIX: বাইরের fileSizeLimit-এর বদলে নিজস্ব, নির্ভরযোগ্য pre-download
+            # size check — download শুরু করার আগেই 2GB চেক করা হয়
+            if is_file_too_large(chat_message):
+                size_str = format_size(get_media_file_size(chat_message))
+                try:
+                    await processing_msg.edit_text(
+                        f"**❌ File is too large ({size_str}).**\n"
+                        f"__My limit is 2 GB — I can't download or upload this file.__",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    pass
+                return
 
             parsed_caption = await get_parsed_msg(
                 chat_message.caption or "", chat_message.caption_entities
@@ -405,6 +481,34 @@ def setup_autolink_handler(app: Client):
             )
 
             if chat_message.media_group_id:
+                # ✅ NEW: processMediaGroup কল করার আগেই প্রতিটি আইটেমের সাইজ চেক করো
+                oversized_count, oversized_names, total_count = await check_media_group_sizes(
+                    user_client, chat_message
+                )
+
+                if oversized_count >= total_count:
+                    # সব আইটেমই 2GB-এর বেশি — পুরো গ্রুপই স্কিপ
+                    try:
+                        await processing_msg.edit_text(
+                            "**❌ All files in this media group exceed 2 GB.**\n"
+                            "__I can't download or upload any of them.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                if oversized_count > 0:
+                    try:
+                        await message.reply_text(
+                            f"**⚠️ Skipping {oversized_count} oversized file(s) (>2 GB):**\n"
+                            + "\n".join(f"• {n}" for n in oversized_names) +
+                            "\n__Only files under 2 GB will be sent.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+
                 try:
                     await processing_msg.delete()
                 except Exception:
@@ -563,6 +667,27 @@ def setup_autolink_handler(app: Client):
 
     # ── PATH 1 + PATH 2: PUBLIC LINK HANDLER ─────────────────────────────────
 
+    # ══════════════════════════════════════════════════════════════════════
+    # ✅ সার্বিক FAIL-SAFE সিস্টেম (Path 1 → Path 2)
+    #
+    #   Path 1 (এই ফাংশন, bot client দিয়ে):
+    #     ১. get_chat()      → ব্যর্থ/ChatPreview/অপ্রত্যাশিত type হলেও থামে না
+    #     ২. get_messages()  → ব্যর্থ হলে সরাসরি Path 2-তে যায়
+    #     ৩. media_group / video / photo / audio / document পাঠানো
+    #        → কোনোটাই ব্যর্থ হলে sent_successfully=False থেকে যায়
+    #
+    #   Path 2 (_public_fallback_via_user_session → _process_protected_public_download):
+    #     bot client-এর যেকোনো ধাপ ব্যর্থ হলে (sent_successfully=False হলে)
+    #     এখানে চলে আসে। এখানে ইউজারের লগইন করা Telegram account (user client)
+    #     দিয়ে সরাসরি download করে, তারপর bot দিয়ে সেটা upload/forward করে।
+    #     ডাউনলোডের আগেই 2GB সাইজ চেক হয় (is_file_too_large)।
+    #     user login করা না থাকলে সঠিকভাবে /login করতে বলে।
+    #
+    #   ফলাফল: bot client কোনো কারণে ব্যর্থ হলে (join না থাকা, protected content,
+    #   ChatType mismatch, ইত্যাদি) — সিস্টেম স্বয়ংক্রিয়ভাবে user client দিয়ে
+    #   কাজ চালিয়ে নেয়, ইউজারকে আলাদা করে কিছু করতে হয় না।
+    # ══════════════════════════════════════════════════════════════════════
+
     async def handle_public_link(client: Client, message: Message, url: str):
         user_id    = message.from_user.id
         chat_id    = message.chat.id
@@ -610,9 +735,7 @@ def setup_autolink_handler(app: Client):
             except Exception as e:
                 LOGGER.warning(f"[Download] Could not update download count: {e}")
 
-        match = re.match(
-            r"(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)/(?:\d+/)?(\d+)", url
-        )
+        match = TELEGRAM_LINK_PATTERN.match(url) or TELEGRAM_LINK_PATTERN.search(url)
         if not match:
             try:
                 await ack_msg.edit_text(
@@ -635,18 +758,53 @@ def setup_autolink_handler(app: Client):
             pass
 
         channel_name = channel_username
+        # ✅ FIX (Pyrofork): forum-enabled supergroups Pyrofork-এ ChatType.SUPERGROUP
+        # না দিয়ে আলাদা ChatType.FORUM রিটার্ন করে। এটাকে valid ধরতে হবে, নাহলে
+        # forum/topic-সহ supergroup লিংকগুলো ভুলভাবে "not supported" এরর দেখাবে।
+        VALID_CHAT_TYPES = [ChatType.CHANNEL, ChatType.SUPERGROUP]
+        if hasattr(ChatType, "FORUM"):
+            VALID_CHAT_TYPES.append(ChatType.FORUM)
+
         try:
             chat = await client.get_chat(channel_username)
-            if chat.type not in [ChatType.CHANNEL, ChatType.SUPERGROUP]:
+            LOGGER.info(
+                f"[PublicLink] Resolved chat.type={getattr(chat, 'type', None)} "
+                f"for {channel_username} (id={getattr(chat, 'id', None)}, "
+                f"is_preview={isinstance(chat, ChatPreview)})"
+            )
+
+            # ✅ FIX: bot/user client চ্যানেলে join না থাকলে get_chat() ChatPreview
+            # রিটার্ন করে (Pyrogram ডকুমেন্টেশন অনুযায়ী)। এর মানে এই না যে
+            # চ্যানেলটা channel/supergroup না — শুধু এই client join করা নেই।
+            # তাই এখানে return না করে, get_messages()-কে আসল টেস্ট হিসেবে
+            # ব্যবহার করবো (যেটা পাবলিক username resolve করে join ছাড়াই কাজ করে)।
+            if isinstance(chat, ChatPreview):
+                LOGGER.info(
+                    f"[PublicLink] {channel_username} is a ChatPreview "
+                    f"(not joined) — proceeding to get_messages() anyway."
+                )
+            elif chat.type not in VALID_CHAT_TYPES:
+                # ✅ FIX: সরাসরি "not supported" বলে থেমে না গিয়ে, user-session
+                # দিয়ে download → upload fallback ট্রাই করো (যদি user login করা থাকে)
+                LOGGER.warning(
+                    f"[PublicLink] Unexpected chat.type={chat.type} for "
+                    f"{channel_username} — falling back to user-session download."
+                )
                 try:
                     await ack_msg.edit_text(
-                        "**❌ This command only supports channels or supergroups!**",
+                        "**⚠️ Unusual chat type detected.**\n"
+                        "**🔄 Trying alternate method via user session...**",
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception:
                     pass
+                await _public_fallback_via_user_session(
+                    client, message, url, channel_username, msg_id,
+                    ack_msg, user, is_premium
+                )
                 return
-            channel_name = f"{chat.title} ({channel_username})"
+            else:
+                channel_name = f"{chat.title} ({channel_username})"
         except (ChannelInvalid, PeerIdInvalid):
             try:
                 await ack_msg.edit_text(
@@ -666,7 +824,9 @@ def setup_autolink_handler(app: Client):
                 pass
             return
         except Exception as e:
-            LOGGER.warning(f"Could not fetch chat name: {e}")
+            # ✅ FIX: get_chat() যেকোনো কারণে fail করলেও থামবো না —
+            # get_messages() দিয়েই আসল ভ্যালিডেশন হবে।
+            LOGGER.warning(f"Could not fetch chat name (non-fatal, continuing): {e}")
 
         try:
             source_message = await client.get_messages(channel_username, msg_id)
@@ -702,6 +862,33 @@ def setup_autolink_handler(app: Client):
 
         try:
             if source_message.media_group_id:
+                # ✅ NEW: processMediaGroup কল করার আগেই প্রতিটি আইটেমের সাইজ চেক করো
+                oversized_count, oversized_names, total_count = await check_media_group_sizes(
+                    client, source_message
+                )
+
+                if oversized_count >= total_count:
+                    try:
+                        await ack_msg.edit_text(
+                            "**❌ All files in this media group exceed 2 GB.**\n"
+                            "__I can't download or upload any of them.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                if oversized_count > 0:
+                    try:
+                        await message.reply_text(
+                            f"**⚠️ Skipping {oversized_count} oversized file(s) (>2 GB):**\n"
+                            + "\n".join(f"• {n}" for n in oversized_names) +
+                            "\n__Only files under 2 GB will be sent.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+
                 ok = await processMediaGroup(
                     source_message,
                     client,
@@ -1083,19 +1270,19 @@ def setup_autolink_handler(app: Client):
                     pass
                 return
 
-            if chat_message.document or chat_message.video or chat_message.audio:
-                file_size = (
-                    chat_message.document.file_size if chat_message.document else
-                    chat_message.video.file_size    if chat_message.video    else
-                    chat_message.audio.file_size
-                )
-                is_premium = await is_premium_user(user_id)
-                if not await fileSizeLimit(file_size, message, "download", is_premium):
-                    try:
-                        await processing_msg.delete()
-                    except Exception:
-                        pass
-                    return
+            # ✅ FIX: বাইরের fileSizeLimit-এর বদলে নিজস্ব, নির্ভরযোগ্য pre-download
+            # size check — download শুরু করার আগেই 2GB চেক করা হয়
+            if is_file_too_large(chat_message):
+                size_str = format_size(get_media_file_size(chat_message))
+                try:
+                    await processing_msg.edit_text(
+                        f"**❌ File is too large ({size_str}).**\n"
+                        f"__My limit is 2 GB — I can't download or upload this file.__",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    pass
+                return
 
             parsed_caption = await get_parsed_msg(
                 chat_message.caption or "", chat_message.caption_entities
@@ -1105,6 +1292,33 @@ def setup_autolink_handler(app: Client):
             )
 
             if chat_message.media_group_id:
+                # ✅ NEW: processMediaGroup কল করার আগেই প্রতিটি আইটেমের সাইজ চেক করো
+                oversized_count, oversized_names, total_count = await check_media_group_sizes(
+                    user_client, chat_message
+                )
+
+                if oversized_count >= total_count:
+                    try:
+                        await processing_msg.edit_text(
+                            "**❌ All files in this media group exceed 2 GB.**\n"
+                            "__I can't download or upload any of them.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                if oversized_count > 0:
+                    try:
+                        await message.reply_text(
+                            f"**⚠️ Skipping {oversized_count} oversized file(s) (>2 GB):**\n"
+                            + "\n".join(f"• {n}" for n in oversized_names) +
+                            "\n__Only files under 2 GB will be sent.__",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+
                 try:
                     await processing_msg.delete()
                 except Exception:
